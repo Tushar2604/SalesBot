@@ -1,0 +1,71 @@
+[
+  {
+    "id": "warm-intro",
+    "name": "Warm intro",
+    "description": "Look at their profile, connect with a short personal note, then ask one easy question once they accept.",
+    "best_for": "Cold outreach to a well-chosen list",
+    "steps": [
+      { "step_type": "view_profile", "delay_hours": 0, "only_if": "always", "on_condition_fail": "skip", "template": "", "timing": "smart" },
+      { "step_type": "invite", "delay_hours": 24, "only_if": "always", "on_condition_fail": "skip", "template": "Hi {{first_name|there}}, came across your profile and liked what you're doing at {{company|your company}}. Would be great to connect.", "timing": "smart" },
+      { "step_type": "message", "delay_hours": 48, "only_if": "if_accepted", "on_condition_fail": "skip", "template": "Thanks for connecting, {{first_name|there}}! What are you focused on at {{company|your team}} this quarter?", "timing": "smart" }
+    ]
+  },
+  {
+    "id": "post-commenter",
+    "name": "Post commenter follow-up",
+    "description": "For people who engaged with a post in your topic. Reference the shared interest, then start a conversation.",
+    "best_for": "Leads from a post's comments or likes",
+    "steps": [
+      { "step_type": "view_profile", "delay_hours": 0, "only_if": "always", "on_condition_fail": "skip", "template": "", "timing": "smart" },
+      { "step_type": "invite", "delay_hours": 12, "only_if": "always", "on_condition_fail": "skip", "template": "Hi {{first_name|there}}, saw your comment on a post I follow — good point. Let's connect.", "timing": "smart" },
+      { "step_type": "message", "delay_hours": 72, "only_if": "if_accepted", "on_condition_fail": "skip", "template": "Good to be connected, {{first_name|there}}. Curious what made that topic important to you?", "timing": "smart" }
+    ]
+  },
+  {
+    "id": "community-audience",
+    "name": "Event or hashtag audience",
+    "description": "For people from the same event, group or hashtag. Lead with the community you share.",
+    "best_for": "Attendees, group members, hashtag followers",
+    "steps": [
+      { "step_type": "view_profile", "delay_hours": 0, "only_if": "always", "on_condition_fail": "skip", "template": "", "timing": "smart" },
+      { "step_type": "invite", "delay_hours": 24, "only_if": "always", "on_condition_fail": "skip", "template": "Hi {{first_name|there}}, we're both part of the {{custom.topic|same}} community — thought I'd say hello.", "timing": "smart" },
+      { "step_type": "message", "delay_hours": 48, "only_if": "if_accepted", "on_condition_fail": "skip", "template": "Thanks for connecting! What got you into {{custom.topic|this space}}?", "timing": "smart" }
+    ]
+  },
+  {
+    "id": "gentle-three-touch",
+    "name": "Gentle 3-touch follow-up",
+    "description": "Connect without a note, open with a light message, then follow up twice, only if they have not replied.",
+    "best_for": "Prospects who go quiet after connecting",
+    "steps": [
+      { "step_type": "view_profile", "delay_hours": 0, "only_if": "always", "on_condition_fail": "skip", "template": "", "timing": "smart" },
+      { "step_type": "invite", "delay_hours": 24, "only_if": "always", "on_condition_fail": "skip", "template": "", "timing": "smart" },
+      { "step_type": "message", "delay_hours": 48, "only_if": "if_accepted", "on_condition_fail": "skip", "template": "Hi {{first_name|there}}, thanks for connecting. What does your week look like at {{company|your company}}?", "timing": "smart" },
+      { "step_type": "message", "delay_hours": 96, "only_if": "if_not_replied", "on_condition_fail": "stop", "template": "{{first_name|Hi}}, just floating this back up in case it got buried. Is this something worth a quick chat?", "timing": "smart" },
+      { "step_type": "message", "delay_hours": 168, "only_if": "if_not_replied", "on_condition_fail": "stop", "template": "Last note from me, {{first_name|there}}. If the timing is off, no problem at all — I'll leave it here.", "timing": "smart" }
+    ]
+  },
+  {
+    "id": "feedback-request",
+    "name": "Feedback request",
+    "description": "Ask for a small piece of expertise instead of pitching. Tends to feel less like sales.",
+    "best_for": "Researching a market or testing an idea",
+    "steps": [
+      { "step_type": "view_profile", "delay_hours": 0, "only_if": "always", "on_condition_fail": "skip", "template": "", "timing": "smart" },
+      { "step_type": "invite", "delay_hours": 24, "only_if": "always", "on_condition_fail": "skip", "template": "Hi {{first_name|there}}, I'm researching how {{title|professionals}} approach outreach and would value connecting.", "timing": "smart" },
+      { "step_type": "message", "delay_hours": 48, "only_if": "if_accepted", "on_condition_fail": "skip", "template": "Thanks for connecting. Would you share one thing that works well for you? Happy to return the favour.", "timing": "smart" }
+    ]
+  },
+  {
+    "id": "quiet-connect",
+    "name": "Quiet connect",
+    "description": "Wait a day after viewing, connect with no note, and only message people who accept.",
+    "best_for": "Warming up a new account with the lowest-friction request",
+    "steps": [
+      { "step_type": "view_profile", "delay_hours": 0, "only_if": "always", "on_condition_fail": "skip", "template": "", "timing": "smart" },
+      { "step_type": "wait", "delay_hours": 24, "only_if": "always", "on_condition_fail": "skip", "template": "", "timing": "smart" },
+      { "step_type": "invite", "delay_hours": 0, "only_if": "always", "on_condition_fail": "skip", "template": "", "timing": "smart" },
+      { "step_type": "message", "delay_hours": 72, "only_if": "if_accepted", "on_condition_fail": "skip", "template": "Hi {{first_name|there}}, thanks for connecting. {{company|Your company}} caught my eye — any priorities this quarter?", "timing": "smart" }
+    ]
+  }
+]

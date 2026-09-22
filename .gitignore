@@ -1,0 +1,43 @@
+.env
+.env.local
+*.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Node
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+npm-debug.log*
+playwright-report/
+test-results/
+
+# Local data
+.docker-data/
+*.sqlite3
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Secrets — never commit
+*.pem
+*.key
+!infra/**/*.example.key
+secrets/
+
+api/debug_screens/

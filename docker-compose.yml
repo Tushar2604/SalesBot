@@ -1,0 +1,191 @@
+name: salesrobo
+
+x-api-env: &api-env
+  ENVIRONMENT: ${ENVIRONMENT:-development}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  API_BASE_URL: ${API_BASE_URL:-http://localhost:8010}
+  WEB_BASE_URL: ${WEB_BASE_URL:-http://localhost:3000}
+  DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://salesrobo:salesrobo_dev_password@postgres:5432/salesrobo}
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+  CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/1}
+  CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/2}
+  JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+  ACCESS_TOKEN_TTL_MINUTES: ${ACCESS_TOKEN_TTL_MINUTES:-30}
+  REFRESH_TOKEN_TTL_DAYS: ${REFRESH_TOKEN_TTL_DAYS:-30}
+  ENCRYPTION_KEY: ${ENCRYPTION_KEY:?set ENCRYPTION_KEY in .env}
+  S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
+  S3_REGION: ${S3_REGION:-us-east-1}
+  S3_BUCKET: ${S3_BUCKET:-salesrobo}
+  S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+  S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  AI_ASSISTANT_PROVIDERS: ${AI_ASSISTANT_PROVIDERS:-openai,gemini}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5-mini}
+  GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+  GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+  LINKEDIN_CLIENT_ID: ${LINKEDIN_CLIENT_ID:-}
+  LINKEDIN_CLIENT_SECRET: ${LINKEDIN_CLIENT_SECRET:-}
+  LINKEDIN_REDIRECT_URI: ${LINKEDIN_REDIRECT_URI:-http://localhost:8010/api/v1/linkedin/oauth/callback}
+  LINKEDIN_API_VERSION: ${LINKEDIN_API_VERSION:-202409}
+  LINKEDIN_PUBLISHING_SCOPES: ${LINKEDIN_PUBLISHING_SCOPES:-openid profile w_member_social}
+  AI_GENERATION_MODEL: ${AI_GENERATION_MODEL:-claude-opus-5}
+  AI_CLASSIFICATION_MODEL: ${AI_CLASSIFICATION_MODEL:-claude-haiku-4-5-20251001}
+  STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+  STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+  LINKEDIN_DRIVER: ${LINKEDIN_DRIVER:-browser}
+  LINKEDIN_ACCEPTANCE_MIN_AGE_MINUTES: ${LINKEDIN_ACCEPTANCE_MIN_AGE_MINUTES:-60}
+  SAFETY_DEFAULT_TEST_MODE: ${SAFETY_DEFAULT_TEST_MODE:-true}
+  SAFETY_TEST_MODE_DAILY_INVITES: ${SAFETY_TEST_MODE_DAILY_INVITES:-3}
+  SAFETY_MAX_DAILY_INVITES: ${SAFETY_MAX_DAILY_INVITES:-75}
+  SAFETY_MAX_WEEKLY_INVITES: ${SAFETY_MAX_WEEKLY_INVITES:-100}
+  SAFETY_MIN_ACTION_GAP_SECONDS: ${SAFETY_MIN_ACTION_GAP_SECONDS:-45}
+  SAFETY_MEDIAN_ACTION_GAP_SECONDS: ${SAFETY_MEDIAN_ACTION_GAP_SECONDS:-240}
+  SAFETY_MAX_ACTION_GAP_SECONDS: ${SAFETY_MAX_ACTION_GAP_SECONDS:-1500}
+  # Remote-browser login (Phase 1) — only the `api` service ever launches a
+  # session, but these are harmless as unused config on worker/beat too, so
+  # they stay in the one shared anchor rather than a second block.
+  REMOTE_BROWSER_MAX_CONCURRENT: ${REMOTE_BROWSER_MAX_CONCURRENT:-3}
+  REMOTE_BROWSER_TTL_SECONDS: ${REMOTE_BROWSER_TTL_SECONDS:-900}
+  REMOTE_BROWSER_IDLE_TIMEOUT_SECONDS: ${REMOTE_BROWSER_IDLE_TIMEOUT_SECONDS:-300}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-salesrobo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-salesrobo_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-salesrobo}
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-salesrobo} -d ${POSTGRES_DB:-salesrobo}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["6379:6379"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    # Docker Hub now gates minio/minio behind auth; quay.io is the open mirror.
+    image: quay.io/minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadmin}
+    ports: ["9000:9000", "9001:9001"]
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ./api
+      # Only `api` hosts remote-browser login sessions (real Chromium via
+      # Playwright) — `worker`/`beat` below stay on the plain `dev` target.
+      target: dev-with-browser
+    # Remote-browser sessions spawn real Chromium processes as grandchildren
+    # of this container's PID 1 (via Playwright's own driver subprocess); when
+    # a session ends, those children get reparented to PID 1 on exit, and
+    # uvicorn — not an init system — never reaps them, leaving zombies. `init:
+    # true` runs a proper init (tini) as PID 1 to reap them instead.
+    init: true
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--h11-max-incomplete-event-size", "262144"]
+    environment: *api-env
+    # Host 8010: port 8000 is commonly taken by other local dev servers.
+    ports: ["8010:8000"]
+    volumes:
+      - ./api:/srv
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
+  # Critical queue: one in-flight action per LinkedIn account is enforced in code
+  # by a Redis slot lock, not by worker concurrency.
+  worker:
+    build:
+      context: ./api
+      # Browser-enabled: the LinkedIn driver runs real Chromium inside worker tasks.
+      target: dev-with-browser
+    init: true
+    shm_size: 1gb
+    # Headed Chromium needs an X display; start one, then hand PID 1's job to celery.
+    command:
+      - sh
+      - -c
+      - >-
+        rm -f /tmp/.X99-lock;
+        Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp &
+        sleep 1;
+        exec celery -A app.worker.celery_app worker --loglevel=info --concurrency=4
+        -Q linkedin.action,linkedin.sync,email.send,ai,webhooks,content.publish,default
+    environment: *api-env
+    volumes:
+      - ./api:/srv
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
+  beat:
+    build:
+      context: ./api
+      target: dev
+    command:
+      - celery
+      - -A
+      - app.worker.celery_app
+      - beat
+      - --loglevel=info
+      - --schedule=/tmp/celerybeat-schedule
+    environment: *api-env
+    volumes:
+      - ./api:/srv
+    depends_on:
+      redis: {condition: service_healthy}
+
+  web:
+    build:
+      context: ./web
+      target: dev
+    command: ["npm", "run", "dev"]
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8010}
+      # Server-side calls stay inside the compose network
+      API_INTERNAL_URL: http://api:8000
+      NODE_ENV: development
+      # inotify events do not cross a Windows-to-Linux bind mount, so Next never
+      # sees edits and silently serves the last compiled page. Polling is the
+      # only reliable watcher here; it costs a little CPU and saves every
+      # "why is my change not showing" cycle.
+      WATCHPACK_POLLING: "true"
+      CHOKIDAR_USEPOLLING: "true"
+    ports: ["3000:3000"]
+    volumes:
+      - ./web:/srv
+      - web_node_modules:/srv/node_modules
+      # Dev build artifacts stay in the container: a shared .next makes
+      # `npm run build` fail on prerender and is slow on Windows bind mounts.
+      - web_next:/srv/.next
+    depends_on: [api]
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
+  web_node_modules:
+  web_next:
