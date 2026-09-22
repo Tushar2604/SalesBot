@@ -1,9 +1,8 @@
 export function IconDashboard({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 20 20" fill="none" className={className}>
-      <path d="M3 12l4-4 3 3 6-6" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M13 5h4v4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-      <circle cx="16.5" cy="15.5" r="1.2" fill="currentColor" />
+      <rect x="3" y="3" width="14" height="14" rx="3.5" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M6.5 12.5v-2M10 12.5V7M13.5 12.5V9" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
     </svg>
   );
 }
@@ -63,6 +62,31 @@ export function IconChevronDown({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 20 20" fill="none" className={className}>
       <path d="M5.5 8l4.5 4 4.5-4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+export function IconChevronRight({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" className={className}>
+      <path d="M8 5.5 12.5 10 8 14.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+export function IconRefresh({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" className={className}>
+      <path d="M16 10a6 6 0 1 1-1.76-4.24" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      <path d="M16 4.5V8h-3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+export function IconHourglass({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" className={className}>
+      <path d="M5.5 4h9M5.5 16h9M6.5 4c0 3.2 2.2 4.6 3.5 6-1.3 1.4-3.5 2.8-3.5 6M13.5 4c0 3.2-2.2 4.6-3.5 6 1.3 1.4 3.5 2.8 3.5 6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
     </svg>
   );
 }
@@ -295,16 +319,46 @@ export function IconArchive({ className }: { className?: string }) {
   );
 }
 
-export function RobotMark({ className }: { className?: string }) {
+export function RobotMark({
+  className,
+  tone = "color",
+}: {
+  className?: string;
+  tone?: "color" | "inherit";
+}) {
+  const fill = tone === "inherit" ? "currentColor" : "#3BDCFF";
+  const eyes = tone === "inherit" ? "#ffffff" : "#0f172a";
   return (
-    <svg viewBox="0 0 32 32" fill="none" className={className}>
-      <circle cx="10" cy="6" r="1.4" fill="currentColor" />
-      <circle cx="22" cy="6" r="1.4" fill="currentColor" />
-      <path d="M10 7.4V11M22 7.4V11" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-      <rect x="5" y="11" width="22" height="16" rx="7" fill="currentColor" />
-      <circle cx="12.5" cy="19" r="2.4" fill="white" />
-      <circle cx="19.5" cy="19" r="2.4" fill="white" />
+    <svg viewBox="0 0 40 40" fill="none" className={className} aria-hidden>
+      <circle cx="11" cy="5" r="2.3" fill={fill} />
+      <circle cx="29" cy="5" r="2.3" fill={fill} />
+      <path d="M11 7v5.2M29 7v5.2" stroke={fill} strokeWidth="2.2" strokeLinecap="round" />
+      <rect x="4" y="12.5" width="32" height="23.5" rx="11.5" fill={fill} />
+      <circle cx="14.8" cy="24.2" r="3.15" fill={eyes} />
+      <circle cx="25.2" cy="24.2" r="3.15" fill={eyes} />
     </svg>
+  );
+}
+
+export function BrandWordmark({
+  className,
+  markClassName,
+  inverted,
+  markTone,
+}: {
+  className?: string;
+  markClassName?: string;
+  inverted?: boolean;
+  markTone?: "color" | "inherit";
+}) {
+  const tone = inverted ? "inherit" : markTone ?? "color";
+  return (
+    <span className={`inline-flex items-center gap-2 ${className ?? ""}`}>
+      <RobotMark className={markClassName ?? "h-8 w-8"} tone={tone} />
+      <span className={`text-[20px] font-medium tracking-tight ${inverted ? "text-white" : "text-ink-950"}`}>
+        SalesBot
+      </span>
+    </span>
   );
 }
 

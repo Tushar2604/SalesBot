@@ -15,8 +15,7 @@ import { inboxApi, type Conversation, type ConversationLabel, type Message } fro
 import { assistantApi, type AssistantMode } from "@/lib/assistant-api";
 import { ConversationList } from "@/components/inbox/ConversationList";
 import { ThreadPanel } from "@/components/inbox/ThreadPanel";
-import { StatCard } from "@/components/app/StatCard";
-import { IconSearch } from "@/components/app/icons";
+import { IconFilter, IconRefresh, IconSearch } from "@/components/app/icons";
 import { useSession } from "@/lib/session";
 import { useLocalState } from "@/lib/localSettings";
 
@@ -60,6 +59,7 @@ export default function InboxPage() {
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [sending, setSending] = useState(false);
   const [assistantMode, setAssistantMode] = useState<AssistantMode | null>(null);
+  const [filtersOpen, setFiltersOpen] = useState(false);
 
   const load = useCallback(async () => {
     if (!workspaceId) return;
@@ -207,12 +207,74 @@ export default function InboxPage() {
   if (!workspaceId) return <p className="text-sm text-slate-500">Select a workspace.</p>;
 
   return (
-    <div className="mx-auto flex h-[calc(100vh-8.5rem)] max-w-7xl flex-col">
-      <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <StatCard label="Total" value={stats.total} tone="cyan" />
-        <StatCard label="Unread" value={stats.unread} tone="rose" />
-        <StatCard label="Interested" value={stats.interested} tone="emerald" />
-        <StatCard label="Snoozed" value={stats.snoozed} tone="violet" />
+    <div className="flex h-[calc(100vh-7.5rem)] flex-col">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-[20px] font-semibold text-ink-950">Your messages</h2>
+          <p className="text-[12.5px] text-slate-400">
+            {stats.unread} unread · {stats.interested} interested · {stats.snoozed} snoozed
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            aria-label="Refresh inbox"
+            onClick={() => void load()}
+            className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 text-slate-500 hover:bg-slate-50"
+          >
+            <IconRefresh className="h-4 w-4" />
+          </button>
+          <div className="relative">
+            <button
+              type="button"
+              aria-label="Filter conversations"
+              onClick={() => setFiltersOpen((v) => !v)}
+              className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 text-slate-500 hover:bg-slate-50"
+            >
+              <IconFilter className="h-4 w-4" />
+            </button>
+            {filtersOpen && (
+              <div className="absolute right-0 top-12 z-20 flex w-56 flex-wrap gap-1.5 rounded-xl border border-slate-200 bg-white p-3 shadow-lg">
+                {FILTERS.map((f) => (
+                  <button
+                    key={f.key}
+                    onClick={() => {
+                      setFilter(f.key);
+                      setFiltersOpen(false);
+                    }}
+                    className={`rounded-full px-3 py-1.5 text-[12px] font-semibold ${
+                      filter === f.key ? "bg-ink-950 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                    }`}
+                  >
+                    {f.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="relative">
+            <IconSearch className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search"
+              className="input h-10 w-48 py-2 pl-9"
+            />
+          </div>
+          <div className="flex rounded-full bg-[#f3f4f6] p-1">
+            {(["linkedin", "salesnav"] as const).map((s) => (
+              <button
+                key={s}
+                onClick={() => setSource(s)}
+                className={`rounded-full px-4 py-1.5 text-[13px] font-medium ${
+                  source === s ? "bg-white text-ink-950 shadow-sm" : "text-slate-500"
+                }`}
+              >
+                {s === "linkedin" ? "LinkedIn" : "Sales Navigator"}
+              </button>
+            ))}
+          </div>
+        </div>
       </div>
 
       {error && (
@@ -221,47 +283,8 @@ export default function InboxPage() {
         </p>
       )}
 
-      <div className="flex min-h-0 flex-1 overflow-hidden rounded-xl border border-slate-200 bg-white">
-        <div className={`flex w-full flex-col border-r border-slate-200 md:w-[360px] md:shrink-0 ${selected ? "hidden md:flex" : "flex"}`}>
-          <div className="border-b border-slate-200 p-4">
-            <div className="mb-3 flex gap-4 border-b border-slate-100">
-              {(["linkedin", "salesnav"] as const).map((s) => (
-                <button
-                  key={s}
-                  onClick={() => setSource(s)}
-                  className={`-mb-px border-b-2 px-1 pb-2 text-[13px] font-semibold ${
-                    source === s ? "border-brand-600 text-brand-600" : "border-transparent text-slate-400 hover:text-slate-600"
-                  }`}
-                >
-                  {s === "linkedin" ? "LinkedIn" : "Sales Navigator"}
-                  {s === "linkedin" && <span className="ml-1.5 text-[11px] text-slate-400">{total}</span>}
-                </button>
-              ))}
-            </div>
-            <div className="relative mb-3">
-              <IconSearch className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-              <input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search conversations…"
-                className="input pl-9"
-              />
-            </div>
-            <div className="flex flex-wrap gap-1.5">
-              {FILTERS.map((f) => (
-                <button
-                  key={f.key}
-                  onClick={() => setFilter(f.key)}
-                  className={`rounded-full px-3 py-1.5 text-[12px] font-semibold transition-colors ${
-                    filter === f.key ? "bg-ink-950 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"
-                  }`}
-                >
-                  {f.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
+      <div className="flex min-h-0 flex-1 overflow-hidden rounded-2xl border border-slate-100 bg-white">
+        <div className={`flex w-full flex-col border-r border-slate-100 md:w-[360px] md:shrink-0 ${selected ? "hidden md:flex" : "flex"}`}>
           {source === "salesnav" ? (
             <div className="flex flex-1 items-center justify-center p-8 text-center">
               <p className="text-sm text-slate-400">
@@ -272,6 +295,10 @@ export default function InboxPage() {
           ) : loading ? (
             <div className="flex flex-1 items-center justify-center">
               <p className="text-sm text-slate-400">Loading…</p>
+            </div>
+          ) : filtered.length === 0 ? (
+            <div className="flex flex-1 items-center justify-center p-8 text-center">
+              <p className="text-sm text-slate-400">No conversations yet.</p>
             </div>
           ) : (
             <ConversationList conversations={filtered} selectedId={selectedId} onSelect={select} />

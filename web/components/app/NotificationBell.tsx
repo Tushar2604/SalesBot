@@ -83,7 +83,7 @@ export function NotificationBell({ workspaceId }: { workspaceId: string | null }
       <button
         onClick={() => void toggle()}
         aria-label="Notifications"
-        className="relative flex h-8 w-8 items-center justify-center rounded-full text-slate-500 hover:bg-slate-100"
+        className="relative flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50 hover:text-ink-950"
       >
         <IconBell className="h-[18px] w-[18px]" />
         {unreadCount > 0 && (

@@ -9,6 +9,7 @@
  */
 
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ApiError, linkedinApi, type LinkedInAccount, type ProxyRecord } from "@/lib/api";
 import { AccountCard } from "@/components/AccountCard";
@@ -92,7 +93,7 @@ export default function AccountsPage() {
   if (!workspaceId) return <p className="text-sm text-slate-500">Select a workspace.</p>;
 
   return (
-    <div className="mx-auto max-w-6xl">
+    <div>
       {publishingResult && (
         <div
           className={
@@ -129,18 +130,15 @@ export default function AccountsPage() {
 
       <div className="mb-6 flex flex-wrap items-center justify-end gap-3">
         {isAdmin && (
-          <button
-            onClick={() => setConnecting(true)}
-            className="flex items-center gap-1.5 rounded-lg bg-brand-600 px-4 py-2.5 text-[13.5px] font-bold text-white hover:bg-brand-700"
-          >
+          <button onClick={() => setConnecting(true)} className="btn-primary">
             Add Account
             <IconPlus className="h-4 w-4" />
           </button>
         )}
-        <button className="flex items-center gap-1.5 rounded-lg bg-brand-700 px-4 py-2.5 text-[13.5px] font-bold text-white hover:bg-brand-800">
+        <Link href="/settings" className="btn-primary">
           Buy Subscription
           <span className="text-[15px] leading-none">$</span>
-        </button>
+        </Link>
       </div>
 
       <div className="mb-6">

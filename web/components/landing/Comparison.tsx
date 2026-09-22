@@ -7,27 +7,18 @@ const ROWS = [
   { feature: "24/7 human support", us: true, them: true },
 ];
 
-const OTHERS = ["Waalaxy", "Expandi", "Lemlist", "Zopto"];
-
 export function Comparison() {
   return (
-    <section className="bg-slate-50/70 py-20 sm:py-28">
-      <div className="mx-auto max-w-5xl px-5 sm:px-8">
-        <div className="mx-auto max-w-2xl text-center">
-          <p className="text-[13px] font-bold uppercase tracking-wider text-brand-600">Comparison</p>
-          <h2 className="mt-3 font-display text-3xl font-extrabold tracking-tight text-ink-950 sm:text-4xl">
-            See how SalesBot stacks up against others
-          </h2>
-          <p className="mt-3 text-[15px] text-slate-500">Compared against {OTHERS.join(", ")}, and more.</p>
-        </div>
-
-        <div className="mt-12 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+    <section className="bg-[#f7f9fc] py-16 sm:py-24">
+      <div className="landing-wrap max-w-5xl">
+        <h2 className="landing-h2">See How SalesBot Stacks Up Against Others</h2>
+        <div className="mt-12 overflow-hidden rounded-[24px] border border-slate-200 bg-white">
           <table className="w-full text-left">
             <thead>
               <tr className="border-b border-slate-200">
-                <th className="px-6 py-4 text-[13px] font-semibold text-slate-500">Feature</th>
-                <th className="px-6 py-4 text-center text-[13.5px] font-bold text-brand-600">SalesBot</th>
-                <th className="px-6 py-4 text-center text-[13px] font-semibold text-slate-400">Others</th>
+                <th className="px-6 py-4 text-[13px] font-medium text-slate-500">Feature</th>
+                <th className="px-6 py-4 text-center text-[13.5px] font-semibold text-ink-950">SalesBot</th>
+                <th className="px-6 py-4 text-center text-[13px] font-medium text-slate-400">Others</th>
               </tr>
             </thead>
             <tbody>

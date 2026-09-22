@@ -46,15 +46,11 @@ export default function SignupPage() {
       await refresh();
       router.push("/dashboard");
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not create your account");
+      setError(err instanceof ApiError ? err.message : "Could not create your account. Is the API running?");
     } finally {
       setBusy(false);
     }
   }
-
-  const fieldClass =
-    "w-full rounded-xl border border-slate-200 bg-brand-50/40 px-4 py-3 text-[14.5px] text-ink-950 placeholder:text-slate-400 focus:border-brand-400 focus:outline-none focus:ring-1 focus:ring-brand-400";
-  const labelClass = "mb-1.5 block text-[14px] font-bold text-ink-950";
 
   return (
     <AuthShell
@@ -63,42 +59,31 @@ export default function SignupPage() {
       switchHref="/login"
       switchLabel="Sign in to your account"
     >
-      <form onSubmit={onSubmit} className="space-y-5">
+      <form onSubmit={onSubmit} className="space-y-4">
         <div className="grid grid-cols-2 gap-4">
           <div>
-            <label className={labelClass} htmlFor="first_name">
+            <label className="label" htmlFor="first_name">
               First Name
             </label>
-            <input
-              id="first_name"
-              className={fieldClass}
-              value={firstName}
-              onChange={(e) => setFirstName(e.target.value)}
-              required
-            />
+            <input id="first_name" className="input" value={firstName} onChange={(e) => setFirstName(e.target.value)} required />
           </div>
           <div>
-            <label className={labelClass} htmlFor="last_name">
+            <label className="label" htmlFor="last_name">
               Last Name
             </label>
-            <input
-              id="last_name"
-              className={fieldClass}
-              value={lastName}
-              onChange={(e) => setLastName(e.target.value)}
-              required
-            />
+            <input id="last_name" className="input" value={lastName} onChange={(e) => setLastName(e.target.value)} required />
           </div>
         </div>
 
         <div>
-          <label className={labelClass} htmlFor="email">
+          <label className="label" htmlFor="email">
             Email address
           </label>
           <input
             id="email"
             type="email"
-            className={fieldClass}
+            className="input"
+            placeholder="Enter your email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             autoComplete="email"
@@ -107,14 +92,14 @@ export default function SignupPage() {
         </div>
 
         <div>
-          <label className={labelClass} htmlFor="password">
+          <label className="label" htmlFor="password">
             Password
           </label>
           <div className="relative">
             <input
               id="password"
               type={showPassword ? "text" : "password"}
-              className={`${fieldClass} pr-11`}
+              className="input pr-11"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               autoComplete="new-password"
@@ -134,14 +119,14 @@ export default function SignupPage() {
         </div>
 
         <div>
-          <label className={labelClass} htmlFor="confirm_password">
+          <label className="label" htmlFor="confirm_password">
             Confirm Password
           </label>
           <div className="relative">
             <input
               id="confirm_password"
               type={showConfirm ? "text" : "password"}
-              className={`${fieldClass} pr-11`}
+              className="input pr-11"
               value={confirmPassword}
               onChange={(e) => setConfirmPassword(e.target.value)}
               autoComplete="new-password"
@@ -159,33 +144,35 @@ export default function SignupPage() {
         </div>
 
         <div>
-          <label className={labelClass} htmlFor="workspace_name">
+          <label className="label" htmlFor="workspace_name">
             Workspace name
           </label>
           <input
             id="workspace_name"
-            className={fieldClass}
+            className="input"
             value={workspaceName}
             onChange={(e) => setWorkspaceName(e.target.value)}
             placeholder="Acme Outbound"
           />
         </div>
 
-        <label className="flex items-center gap-2.5 text-[13.5px] font-medium text-slate-600">
+        <label className="flex items-start gap-2.5 text-[13.5px] font-medium text-slate-600">
           <input
             type="checkbox"
             checked={agreed}
             onChange={(e) => setAgreed(e.target.checked)}
-            className="h-4 w-4 rounded border-slate-300 text-brand-600"
+            className="mt-0.5 h-4 w-4 rounded border-slate-300 text-accent"
           />
-          I agree to{" "}
-          <a href="#" className="font-semibold text-brand-600 hover:underline">
-            Terms of Service
-          </a>{" "}
-          and{" "}
-          <a href="#" className="font-semibold text-brand-600 hover:underline">
-            Privacy Policy
-          </a>
+          <span>
+            I agree to{" "}
+            <a href="#faq" className="font-semibold text-accent hover:underline">
+              Terms of Service
+            </a>{" "}
+            and{" "}
+            <a href="#faq" className="font-semibold text-accent hover:underline">
+              Privacy Policy
+            </a>
+          </span>
         </label>
 
         {error && (
@@ -194,11 +181,7 @@ export default function SignupPage() {
           </p>
         )}
 
-        <button
-          type="submit"
-          className="flex w-full items-center justify-center gap-2 rounded-xl bg-brand-600 py-3.5 text-[15px] font-bold text-white hover:bg-brand-700 disabled:opacity-50"
-          disabled={busy}
-        >
+        <button type="submit" className="btn-primary h-12 w-full text-[15px]" disabled={busy}>
           {busy ? "Creating…" : "Sign up"}
           {!busy && <IconArrowRight className="h-4 w-4" />}
         </button>

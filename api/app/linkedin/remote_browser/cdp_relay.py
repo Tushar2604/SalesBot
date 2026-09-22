@@ -99,15 +99,17 @@ class CdpRelay:
                     },
                 )
             else:
-                await self._cdp.send(
-                    "Input.dispatchKeyEvent",
-                    {
-                        "type": _KEY_EVENT_TYPE[message.event],
-                        "key": message.key,
-                        "code": message.code,
-                        "windowsVirtualKeyCode": message.windows_virtual_key_code,
-                        "text": message.text,
-                    },
-                )
+                payload: dict[str, object] = {
+                    "type": _KEY_EVENT_TYPE[message.event],
+                    "key": message.key,
+                    "code": message.code,
+                    "windowsVirtualKeyCode": message.windows_virtual_key_code,
+                    "text": message.text,
+                }
+                await self._cdp.send("Input.dispatchKeyEvent", payload)
+                # React-controlled LinkedIn inputs often ignore keyDown/keyUp
+                # unless a following insertText actually commits the character.
+                if message.event == "keydown" and message.text:
+                    await self._cdp.send("Input.insertText", {"text": message.text})
         except Exception as exc:
             log.debug("remote_browser.input_dispatch_failed", error=str(exc))

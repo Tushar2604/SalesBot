@@ -78,6 +78,14 @@ async function toApiError(response: Response): Promise<ApiError> {
   return new ApiError(response.status, "error", response.statusText || "Request failed");
 }
 
+function networkError(): ApiError {
+  return new ApiError(
+    0,
+    "network_error",
+    `Can't reach the API at ${API_BASE}. Start the backend, then try again.`,
+  );
+}
+
 async function refreshAccessToken(): Promise<boolean> {
   if (!refreshInFlight) {
     refreshInFlight = (async () => {
@@ -127,10 +135,19 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
     });
   };
 
-  let response = await send();
+  let response: Response;
+  try {
+    response = await send();
+  } catch {
+    throw networkError();
+  }
 
   if (response.status === 401 && retryOnUnauthorized && (await refreshAccessToken())) {
-    response = await send();
+    try {
+      response = await send();
+    } catch {
+      throw networkError();
+    }
   }
 
   if (!response.ok) throw await toApiError(response);

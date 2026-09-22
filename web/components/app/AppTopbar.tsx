@@ -6,7 +6,7 @@ import { useSession } from "@/lib/session";
 import { AccountMenu } from "@/components/app/AccountMenu";
 import { NotificationBell } from "@/components/app/NotificationBell";
 import { SafetyGuide } from "@/components/app/SafetyGuide";
-import { IconDollar, IconGift, IconHelp, IconPanel } from "@/components/app/icons";
+import { IconDollar, IconGift, IconHourglass, IconPanel } from "@/components/app/icons";
 
 const TITLES: Record<string, string> = {
   "/dashboard": "Dashboard",
@@ -15,22 +15,38 @@ const TITLES: Record<string, string> = {
   "/guide": "Guide",
   "/assistant": "AI Assistant",
   "/accounts": "Accounts",
-  "/leads": "Sales Console",
+  "/leads": "Leads",
   "/team": "Team",
   "/settings": "Settings",
   "/admin/settings": "Admin Settings",
   "/templates": "Templates",
   "/agency-view": "Agency View",
   "/integrations": "Integrations",
+  "/content": "Content Studio",
 };
+
+const TRIAL_DAYS = 14;
+
+export function trialDaysLeft(createdAt: string | undefined): number {
+  if (!createdAt) return TRIAL_DAYS;
+  const end = new Date(createdAt).getTime() + TRIAL_DAYS * 86_400_000;
+  return Math.max(0, Math.ceil((end - Date.now()) / 86_400_000));
+}
+
+function titleFor(pathname: string): string {
+  if (TITLES[pathname]) return TITLES[pathname];
+  const match = Object.keys(TITLES).find((key) => key !== "/dashboard" && pathname.startsWith(`${key}/`));
+  return match ? TITLES[match] : "SalesBot";
+}
 
 export function AppTopbar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
   const pathname = usePathname();
-  const { workspace } = useSession();
-  const title = TITLES[pathname] ?? "SalesBot";
+  const { workspace, me } = useSession();
+  const title = titleFor(pathname);
+  const days = trialDaysLeft(me?.user.created_at);
 
   return (
-    <header className="flex h-16 shrink-0 items-center justify-between border-b border-slate-200 bg-white px-4 sm:px-6">
+    <header className="flex h-[64px] shrink-0 items-center justify-between bg-white px-4 sm:px-6">
       <div className="flex items-center gap-3">
         <button
           onClick={onToggle}
@@ -39,31 +55,31 @@ export function AppTopbar({ collapsed, onToggle }: { collapsed: boolean; onToggl
         >
           <IconPanel className={collapsed ? "h-5 w-5 rotate-180" : "h-5 w-5"} />
         </button>
-        <h1 className="text-lg font-bold tracking-tight text-ink-950">{title}</h1>
+        <h1 className="text-[22px] font-semibold tracking-tight text-ink-950">{title}</h1>
       </div>
 
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2.5">
+        <Link
+          href="/settings"
+          className="hidden items-center gap-2 rounded-full bg-[#fff4e8] px-3.5 py-1.5 text-[13px] font-medium text-[#f97316] sm:flex"
+        >
+          <IconHourglass className="h-4 w-4" />
+          {days} trial days left
+        </Link>
         <SafetyGuide />
         <Link
           href="/settings"
-          className="hidden items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-[12.5px] font-semibold text-amber-700 hover:bg-amber-100 sm:flex"
+          aria-label="Billing"
+          className="flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50 hover:text-ink-950"
         >
           <IconDollar className="h-4 w-4" />
-          Your Plan
         </Link>
-        <a
-          href="/#faq"
-          className="hidden items-center gap-1.5 rounded-full border border-brand-100 bg-brand-50 px-3 py-1.5 text-[12.5px] font-semibold text-brand-700 hover:bg-brand-100 sm:flex"
-        >
-          <IconHelp className="h-4 w-4" />
-          Get Help
-        </a>
         <Link
           href="/team"
-          className="hidden items-center gap-1.5 rounded-full border border-rose-200 bg-rose-50 px-3 py-1.5 text-[12.5px] font-semibold text-rose-700 hover:bg-rose-100 sm:flex"
+          aria-label="Refer and earn"
+          className="flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50 hover:text-ink-950"
         >
           <IconGift className="h-4 w-4" />
-          Refer and Earn
         </Link>
         <NotificationBell workspaceId={workspace?.id ?? null} />
         <AccountMenu />

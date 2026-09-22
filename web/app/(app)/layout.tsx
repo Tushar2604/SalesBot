@@ -35,10 +35,10 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <div className="flex min-h-screen bg-slate-50">
+    <div className="flex min-h-screen bg-white">
       <AppSidebar collapsed={collapsed} />
 
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col bg-white">
         <AppTopbar collapsed={collapsed} onToggle={() => setCollapsed((v) => !v)} />
 
         {workspace?.outreach_paused && (
@@ -48,15 +48,13 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
             {hasRole(role, "admin") ? " in Configuration." : " by an admin."}
           </div>
         )}
-        <main className="flex-1 px-4 py-6 sm:px-8 sm:py-8">
+        <main className="flex-1 px-5 pb-10 pt-2 sm:px-8">
           {!onboarding.loading && (
-            <div className="mx-auto max-w-6xl">
-              <GettingStartedCard
-                workspaceId={workspace?.id ?? null}
-                doneCount={onboarding.doneCount}
-                onContinue={() => router.push(onboarding.nextHref)}
-              />
-            </div>
+            <GettingStartedCard
+              workspaceId={workspace?.id ?? null}
+              doneCount={onboarding.doneCount}
+              onContinue={() => router.push(onboarding.nextHref)}
+            />
           )}
           {children}
         </main>

@@ -1,72 +1,99 @@
-const ROWS = [
-  { name: "Priya Nair", role: "VP Sales, Northwind", state: "Replied", color: "bg-emerald-500" },
-  { name: "Marcus Webb", role: "Founder, Loopline", state: "Meeting booked", color: "bg-brand-500" },
-  { name: "Elena Ruiz", role: "Head of Growth, Fenwick", state: "Connected", color: "bg-amber-500" },
-  { name: "Sam Okafor", role: "CRO, Basalt", state: "Replied", color: "bg-emerald-500" },
+const STEPS = [
+  "Add linkedin account",
+  "Create campaign",
+  "Details",
+  "Add profiles",
+  "Review",
+  "Configure",
+  "Import",
+  "Start campaign",
+  "Configure settings",
+];
+
+const NODES = [
+  { x: "8%", y: "18%", name: "Ava Chen", role: "VP Sales" },
+  { x: "72%", y: "10%", name: "Marcus W.", role: "Founder" },
+  { x: "6%", y: "62%", name: "Elena R.", role: "Head of Growth" },
+  { x: "70%", y: "68%", name: "Sam Okafor", role: "CRO" },
 ];
 
 export function DashboardMock() {
   return (
-    <div className="relative rounded-2xl border border-slate-200 bg-white p-2.5 shadow-[0_30px_80px_-30px_rgba(15,23,42,0.35)] sm:p-3">
-      <div className="flex items-center gap-1.5 px-2 pb-2.5 pt-1">
-        <span className="h-2.5 w-2.5 rounded-full bg-rose-300" />
-        <span className="h-2.5 w-2.5 rounded-full bg-amber-300" />
-        <span className="h-2.5 w-2.5 rounded-full bg-emerald-300" />
-        <span className="ml-3 h-6 flex-1 rounded-md bg-slate-100" />
+    <div className="relative overflow-hidden rounded-[28px] border border-white/70 bg-white/80 shadow-hero backdrop-blur">
+      <div className="flex items-center gap-6 border-b border-slate-100 px-5 py-3">
+        <span className="text-[13px] font-semibold text-ink-950">Campaign</span>
+        <span className="text-[13px] font-medium text-slate-400">Sequence</span>
       </div>
-      <div className="grid grid-cols-[minmax(0,150px)_1fr] gap-3 rounded-xl bg-slate-50/70 p-3 sm:grid-cols-[170px_1fr]">
-        <div className="hidden flex-col gap-1 sm:flex">
-          {["Overview", "Campaigns", "Leads", "Inbox", "Sequences", "Team"].map((item, i) => (
+      <div className="grid min-h-[420px] grid-cols-1 md:grid-cols-[210px_1fr]">
+        <aside className="hidden border-r border-slate-100 p-4 md:block">
+          <p className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-slate-400">Setup</p>
+          <ol className="flex flex-col gap-1">
+            {STEPS.map((step, i) => (
+              <li
+                key={step}
+                className={`flex items-center gap-2 rounded-lg px-2 py-1.5 text-[12.5px] ${
+                  i === 1 ? "bg-slate-50 font-semibold text-ink-950" : "text-slate-500"
+                }`}
+              >
+                <span
+                  className={`flex h-4 w-4 items-center justify-center rounded-full text-[9px] ${
+                    i < 2 ? "bg-robot text-ink-950" : "border border-slate-200 text-slate-400"
+                  }`}
+                >
+                  {i < 2 ? "✓" : i + 1}
+                </span>
+                {step}
+              </li>
+            ))}
+          </ol>
+        </aside>
+
+        <div className="relative overflow-hidden bg-gradient-to-br from-[#eef7ff] via-white to-[#f6efff] p-6">
+          <svg className="pointer-events-none absolute inset-0 h-full w-full" aria-hidden>
+            <path d="M90 90 C 180 70, 240 140, 250 190" fill="none" stroke="#c7d6ea" strokeWidth="2" strokeDasharray="4 6" />
+            <path d="M90 250 C 160 220, 210 210, 250 190" fill="none" stroke="#c7d6ea" strokeWidth="2" strokeDasharray="4 6" />
+            <path d="M410 80 C 330 90, 290 140, 250 190" fill="none" stroke="#c7d6ea" strokeWidth="2" strokeDasharray="4 6" />
+            <path d="M410 270 C 330 250, 290 220, 250 190" fill="none" stroke="#c7d6ea" strokeWidth="2" strokeDasharray="4 6" />
+          </svg>
+
+          {NODES.map((n) => (
             <div
-              key={item}
-              className={`rounded-lg px-3 py-2 text-[13px] font-medium ${
-                i === 1 ? "bg-white text-ink-950 shadow-sm" : "text-slate-500"
-              }`}
+              key={n.name}
+              className="absolute flex items-center gap-2 rounded-full border border-white bg-white px-2 py-1.5 shadow-sm"
+              style={{ left: n.x, top: n.y }}
             >
-              {item}
+              <span className="flex h-8 w-8 items-center justify-center rounded-full bg-ink-950 text-[11px] font-semibold text-white">
+                {n.name
+                  .split(" ")
+                  .map((p) => p[0])
+                  .join("")}
+              </span>
+              <span className="pr-2">
+                <span className="block text-[11.5px] font-semibold leading-tight text-ink-950">{n.name}</span>
+                <span className="block text-[10px] text-slate-400">{n.role}</span>
+              </span>
             </div>
           ))}
-        </div>
-        <div className="rounded-xl bg-white p-3 shadow-sm sm:p-4">
-          <div className="mb-3 flex items-center justify-between">
-            <div>
-              <p className="text-[13px] font-semibold text-ink-950">Q3 Outbound &mdash; Series A SaaS</p>
-              <p className="text-[11.5px] text-slate-400">412 leads &middot; running on autopilot</p>
+
+          <div className="absolute left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-3">
+            <div className="flex h-16 w-16 items-center justify-center rounded-full bg-white shadow-card ring-4 ring-white">
+              <svg viewBox="0 0 40 40" className="h-10 w-10" aria-hidden>
+                <circle cx="11" cy="5" r="2.3" fill="#3BDCFF" />
+                <circle cx="29" cy="5" r="2.3" fill="#3BDCFF" />
+                <path d="M11 7v5.2M29 7v5.2" stroke="#3BDCFF" strokeWidth="2.2" strokeLinecap="round" />
+                <rect x="4" y="12.5" width="32" height="23.5" rx="11.5" fill="#3BDCFF" />
+                <circle cx="14.8" cy="24.2" r="3.15" fill="#0f172a" />
+                <circle cx="25.2" cy="24.2" r="3.15" fill="#0f172a" />
+              </svg>
             </div>
-            <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-600">
-              Active
-            </span>
-          </div>
-          <div className="mb-4 grid grid-cols-3 gap-2">
-            {[
-              { label: "Sent", value: "3,204" },
-              { label: "Reply rate", value: "44.5%" },
-              { label: "Booked", value: "58" },
-            ].map((s) => (
-              <div key={s.label} className="rounded-lg border border-slate-100 bg-slate-50/60 p-2.5">
-                <p className="text-[10.5px] font-medium uppercase tracking-wide text-slate-400">{s.label}</p>
-                <p className="font-display text-[17px] font-extrabold text-ink-950">{s.value}</p>
-              </div>
-            ))}
-          </div>
-          <div className="flex flex-col gap-2">
-            {ROWS.map((r) => (
-              <div key={r.name} className="flex items-center justify-between rounded-lg border border-slate-100 px-2.5 py-2">
-                <div className="flex items-center gap-2.5">
-                  <span className="flex h-7 w-7 items-center justify-center rounded-full bg-ink-950 text-[11px] font-bold text-white">
-                    {r.name.split(" ").map((n) => n[0]).join("")}
-                  </span>
-                  <div>
-                    <p className="text-[12.5px] font-semibold text-ink-950">{r.name}</p>
-                    <p className="text-[11px] text-slate-400">{r.role}</p>
-                  </div>
-                </div>
-                <span className={`flex items-center gap-1.5 text-[11.5px] font-semibold text-slate-500`}>
-                  <span className={`h-1.5 w-1.5 rounded-full ${r.color}`} />
-                  {r.state}
-                </span>
-              </div>
-            ))}
+            <div className="flex gap-2">
+              <span className="flex h-8 w-8 items-center justify-center rounded-full bg-[#0a66c2] text-[11px] font-bold text-white">
+                in
+              </span>
+              <span className="flex h-8 w-8 items-center justify-center rounded-full bg-amber-400 text-[11px] font-bold text-white">
+                @
+              </span>
+            </div>
           </div>
         </div>
       </div>

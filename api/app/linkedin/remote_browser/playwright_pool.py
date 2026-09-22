@@ -1,33 +1,99 @@
-"""Lazy, process-wide Playwright driver, and the proxy shape adapter.
+"""Lazy Playwright driver on a private event loop.
 
-Playwright's own driver process is heavy to start; it is started once, lazily,
-on the first remote-browser session rather than at import time or container
-boot — most of the time nobody is connecting an account, and there is no
-reason to pay Chromium's/Playwright's baseline memory cost until someone does.
+Uvicorn on Windows uses SelectorEventLoop, which cannot spawn subprocesses
+(`asyncio.create_subprocess_exec` raises NotImplementedError). Playwright's
+driver is a subprocess, so it must run on a ProactorEventLoop. One background
+thread owns that loop; every Playwright await is marshaled onto it.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
+import threading
+from collections.abc import Coroutine
+from pathlib import Path
+from typing import Any, TypeVar
 from urllib.parse import urlsplit
 
 from app.linkedin.proxy import ResolvedProxy
 
+T = TypeVar("T")
+
 _playwright: object | None = None
-_playwright_lock = asyncio.Lock()
+_pw_loop: asyncio.AbstractEventLoop | None = None
+_pw_thread: threading.Thread | None = None
+_pw_ready = threading.Event()
+_pw_error: BaseException | None = None
+_start_lock = threading.Lock()
+
+_USER_BROWSERS = Path.home() / "AppData" / "Local" / "ms-playwright"
+
+
+def _ensure_browsers_path() -> None:
+    """Prefer a real user cache if Cursor's temp Playwright path is empty."""
+    current = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
+    if current and any(Path(current).glob("chromium-*")):
+        return
+    if any(_USER_BROWSERS.glob("chromium-*")):
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(_USER_BROWSERS)
+
+
+def _thread_main() -> None:
+    global _playwright, _pw_loop, _pw_error
+    _ensure_browsers_path()
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    _pw_loop = loop
+    try:
+        from playwright.async_api import async_playwright
+
+        _playwright = loop.run_until_complete(async_playwright().start())
+        _pw_ready.set()
+        loop.run_forever()
+    except BaseException as exc:
+        _pw_error = exc
+        _pw_ready.set()
+        raise
+
+
+def _ensure_loop() -> asyncio.AbstractEventLoop:
+    global _pw_thread, _pw_error
+    with _start_lock:
+        if _pw_thread is None or not _pw_thread.is_alive():
+            _pw_ready.clear()
+            _pw_error = None
+            _pw_thread = threading.Thread(target=_thread_main, name="playwright-loop", daemon=True)
+            _pw_thread.start()
+    if not _pw_ready.wait(timeout=60):
+        raise RuntimeError("Playwright driver timed out while starting")
+    if _pw_error is not None:
+        raise RuntimeError(f"Playwright driver failed: {_pw_error}") from _pw_error
+    if _pw_loop is None or _playwright is None:
+        raise RuntimeError("Playwright driver failed to start")
+    return _pw_loop
+
+
+async def run_on_playwright_loop(coro: Coroutine[Any, Any, T]) -> T:
+    """Await `coro` on the Playwright loop, from any asyncio loop."""
+    loop = _ensure_loop()
+    try:
+        running = asyncio.get_running_loop()
+    except RuntimeError:
+        running = None
+    if running is loop:
+        return await coro
+    return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coro, loop))
 
 
 async def get_playwright() -> object:
-    """Returns the shared `async_playwright()` context object, starting it on first use."""
-    global _playwright
-    async with _playwright_lock:
-        if _playwright is None:
-            # Imported lazily: this module (and its native driver binary) is
-            # only present when the `browser` optional dependency group is
-            # installed, which only the `api` image does.
-            from playwright.async_api import async_playwright
-
-            _playwright = await async_playwright().start()
+    """Returns the shared Playwright instance. Safe to call from any loop."""
+    _ensure_loop()
+    if _playwright is None:
+        raise RuntimeError("Playwright driver failed to start")
     return _playwright
 
 

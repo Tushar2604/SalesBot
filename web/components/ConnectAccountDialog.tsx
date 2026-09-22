@@ -80,16 +80,11 @@ export function ConnectAccountDialog({
           timezone,
           proxy_id: proxyId || null,
         });
+        onConnected();
       } else {
-        await linkedinApi.connectWithCredentials(workspaceId, {
-          label,
-          email,
-          password,
-          timezone,
-          proxy_id: proxyId || null,
-        });
+        setRemoteBrowserOpen(true);
+        return;
       }
-      onConnected();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not start the connection");
     } finally {

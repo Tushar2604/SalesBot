@@ -11,7 +11,7 @@ import {
   IconBolt,
   IconBook,
   IconBriefcase,
-  IconChevronDown,
+  IconChevronRight,
   IconChevronUpDown,
   IconConsole,
   IconDashboard,
@@ -22,23 +22,31 @@ import {
   IconPencil,
   IconShield,
   IconUsers,
+  BrandWordmark,
   RobotMark,
   IconSparkle,
 } from "@/components/app/icons";
 
 const NAV = [
   { href: "/dashboard", label: "Dashboard", icon: IconDashboard },
-  { href: "/guide", label: "Guide", icon: IconBook },
   { href: "/campaigns", label: "Campaigns", icon: IconBolt },
-  { href: "/leads", label: "Leads", icon: IconConsole },
   { href: "/inbox", label: "Inbox", icon: IconInbox },
-  { href: "/assistant", label: "AI Assistant", icon: IconSparkle },
-  { href: "/content", label: "Content Studio", icon: IconPencil },
   { href: "/accounts", label: "Accounts", icon: IconUsers },
 ];
 
-const ADVANCED_ROUTES = ["/templates", "/agency-view", "/integrations"];
+const SETTINGS_ROUTES = ["/settings", "/admin/settings", "/team"];
+const SETTINGS_LINKS = [
+  { href: "/settings", label: "Settings" },
+  { href: "/admin/settings", label: "Admin Settings" },
+  { href: "/team", label: "Team" },
+];
+
+const ADVANCED_ROUTES = ["/guide", "/leads", "/assistant", "/content", "/templates", "/agency-view", "/integrations"];
 const ADVANCED_LINKS = [
+  { href: "/guide", label: "Guide", icon: IconBook },
+  { href: "/leads", label: "Leads", icon: IconConsole },
+  { href: "/assistant", label: "AI Assistant", icon: IconSparkle },
+  { href: "/content", label: "Content Studio", icon: IconPencil },
   { href: "/templates", label: "Templates", icon: IconLayers },
   { href: "/agency-view", label: "Agency View", icon: IconBriefcase },
   { href: "/integrations", label: "Integrations", icon: IconLink },
@@ -46,7 +54,6 @@ const ADVANCED_LINKS = [
 
 const UNREAD_POLL_MS = 20_000;
 
-/** Conversations with something new, refreshed on navigation and on a timer. */
 function useUnreadInbox(workspaceId: string | undefined, pathname: string): number {
   const [count, setCount] = useState(0);
 
@@ -73,7 +80,7 @@ function useUnreadInbox(workspaceId: string | undefined, pathname: string): numb
 }
 
 function LinkedInAccountPanel({ collapsed }: { collapsed: boolean }) {
-  const { workspace } = useSession();
+  const { workspace, me, selectWorkspace } = useSession();
   const [account, setAccount] = useState<LinkedInAccount | null | "loading">("loading");
 
   useEffect(() => {
@@ -90,165 +97,119 @@ function LinkedInAccountPanel({ collapsed }: { collapsed: boolean }) {
 
   if (collapsed) return null;
 
+  const name =
+    account && account !== "loading"
+      ? account.full_name || account.label || "LinkedIn account"
+      : me?.user.full_name || workspace?.name || "Account";
+  const initials = name
+    .split(" ")
+    .map((p) => p[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
+  const connected = account && account !== "loading" ? account.is_connected : false;
+  const safeOn = account && account !== "loading" ? account.test_mode : true;
+
   return (
-    <div className="px-5 pt-5">
-      <p className="mb-2 text-[11px] font-bold uppercase tracking-wider text-slate-500">
+    <div className="px-4 pt-6">
+      <p className="mb-3 px-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
         LinkedIn Account
       </p>
-      {account === "loading" ? (
-        <div className="h-[60px] animate-pulse rounded-xl border border-white/10 bg-white/[0.03]" />
-      ) : account === null ? (
-        <Link
-          href="/accounts"
-          className="flex flex-col gap-1 rounded-xl border border-dashed border-white/15 px-3 py-2.5 text-[12.5px] font-medium text-slate-400 hover:border-white/30 hover:text-white"
-        >
-          No account connected
-          <span className="text-brand-400">Connect one &rarr;</span>
-        </Link>
-      ) : (
-        <Link
-          href="/accounts"
-          className="flex w-full items-center gap-2.5 rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2.5 hover:bg-white/[0.06]"
-        >
-          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-brand-400 to-violet-500 text-[11px] font-bold text-white">
-            {(account.full_name || account.label || "?")[0]?.toUpperCase()}
+      <Link href="/accounts" className="relative flex items-center gap-3 px-1 py-1">
+        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#2a2d35] text-[12px] font-semibold text-white">
+          {account === "loading" ? "…" : initials}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-[13.5px] font-medium text-white">{name}</span>
+          <span className={clsx("block text-[12px] font-medium", connected ? "text-emerald-400" : "text-[#ff4d4f]")}>
+            {account === "loading" ? "…" : account ? (connected ? "Connected" : "Disconnected") : "No account"}
           </span>
-          <span className="min-w-0 flex-1">
-            <span className="block truncate text-[13.5px] font-semibold text-white">
-              {account.full_name || account.label || "LinkedIn account"}
-            </span>
-            <span
-              className={clsx(
-                "block text-[11.5px] font-medium",
-                account.is_connected ? "text-emerald-400" : "text-rose-400",
-              )}
-            >
-              {account.is_connected ? "Connected" : "Disconnected"}
-            </span>
-          </span>
-        </Link>
-      )}
-      {account && account !== "loading" && (
-        <Link
-          href="/settings"
-          title="Change in Settings, then Safe Mode"
-          className={clsx(
-            "mt-2 flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11.5px] font-semibold transition-colors",
-            account.test_mode
-              ? "bg-emerald-400/10 text-emerald-400 hover:bg-emerald-400/20"
-              : "bg-amber-400/10 text-amber-300 hover:bg-amber-400/20",
-          )}
-        >
-          <IconShield className="h-3.5 w-3.5" />
-          Safe Mode {account.test_mode ? "On" : "Off"}
-        </Link>
-      )}
+        </span>
+        <IconChevronUpDown className="h-4 w-4 shrink-0 text-slate-500" />
+        {me && me.workspaces.length > 1 && (
+          <select
+            aria-label="Switch workspace"
+            className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+            value={workspace?.id ?? ""}
+            onChange={(e) => selectWorkspace(e.target.value)}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {me.workspaces.map(({ workspace: ws }) => (
+              <option key={ws.id} value={ws.id}>
+                {ws.name}
+              </option>
+            ))}
+          </select>
+        )}
+      </Link>
+      <Link
+        href="/settings"
+        className="mt-3 flex items-center gap-1.5 px-1 text-[12.5px] font-medium text-[#22c55e]"
+      >
+        <IconShield className="h-3.5 w-3.5" />
+        Safe Mode {safeOn ? "On" : "Off"}
+      </Link>
+      <div className="mt-4 h-px bg-white/10" />
     </div>
+  );
+}
+
+function navClass(active: boolean, collapsed: boolean) {
+  return clsx(
+    "flex items-center gap-3 rounded-[10px] px-3 py-3 text-[14px] transition-colors",
+    collapsed && "justify-center px-2",
+    active ? "bg-[#f3f4f6] font-medium text-ink-950" : "font-normal text-[#a3acba] hover:bg-white/[0.06] hover:text-white",
   );
 }
 
 export function AppSidebar({ collapsed }: { collapsed: boolean }) {
   const pathname = usePathname();
-  const { me, workspace, role, selectWorkspace, signOut } = useSession();
-  const settingsRoutes = ["/settings", "/admin/settings", "/team"];
-  const [settingsOpen, setSettingsOpen] = useState(settingsRoutes.includes(pathname));
-  const [advancedOpen, setAdvancedOpen] = useState(ADVANCED_ROUTES.includes(pathname));
+  const { workspace } = useSession();
+  const [settingsOpen, setSettingsOpen] = useState(SETTINGS_ROUTES.includes(pathname));
+  const [advancedOpen, setAdvancedOpen] = useState(ADVANCED_ROUTES.some((r) => pathname === r || pathname.startsWith(`${r}/`)));
 
-  const settingsActive = settingsRoutes.includes(pathname);
-  const advancedActive = ADVANCED_ROUTES.includes(pathname);
+  const settingsActive = SETTINGS_ROUTES.includes(pathname);
+  const advancedActive = ADVANCED_ROUTES.some((r) => pathname === r || pathname.startsWith(`${r}/`));
   const unreadInbox = useUnreadInbox(workspace?.id, pathname);
 
   return (
     <aside
       className={clsx(
-        "hidden shrink-0 flex-col bg-ink-950 text-slate-300 md:flex",
-        collapsed ? "w-[76px]" : "w-64",
+        "hidden shrink-0 flex-col bg-[#0b0c10] text-[#a3acba] md:flex",
+        collapsed ? "w-[76px]" : "w-[240px]",
       )}
     >
-      <Link
-        href="/"
-        className={clsx("flex items-center gap-2 px-5 pb-2 pt-6", collapsed && "justify-center px-0")}
-      >
-        <RobotMark className="h-7 w-7 shrink-0 text-brand-400" />
-        {!collapsed && <span className="font-display text-lg font-extrabold tracking-tight text-white">SalesBot</span>}
-      </Link>
-
-      <div className={clsx("px-5 pt-5", collapsed && "px-3")}>
-        {!collapsed && (
-          <p className="mb-2 text-[11px] font-bold uppercase tracking-wider text-slate-500">Workspace</p>
+      <Link href="/dashboard" className={clsx("flex items-center gap-2 px-5 pb-1 pt-5", collapsed && "justify-center px-0")}>
+        {collapsed ? (
+          <RobotMark className="h-8 w-8 shrink-0" />
+        ) : (
+          <BrandWordmark inverted markClassName="h-8 w-8" className="text-white" />
         )}
-        <div
-          className={clsx(
-            "relative flex w-full items-center gap-2.5 rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2.5 hover:bg-white/[0.06]",
-            collapsed && "justify-center px-2",
-          )}
-        >
-          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-brand-400 to-violet-500 text-[11px] font-bold text-white">
-            {(workspace?.name || me?.user.full_name || "W")[0]?.toUpperCase()}
-          </span>
-          {!collapsed && (
-            <>
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-[13.5px] font-semibold text-white">
-                  {workspace?.name || "No workspace"}
-                </span>
-                <span className={clsx("block text-[11.5px] font-medium", workspace ? "text-emerald-400" : "text-rose-400")}>
-                  {workspace ? "Connected" : "Disconnected"}
-                </span>
-              </span>
-              <IconChevronUpDown className="h-4 w-4 shrink-0 text-slate-500" />
-            </>
-          )}
-          {me && me.workspaces.length > 0 && (
-            <select
-              aria-label="Switch workspace"
-              className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
-              value={workspace?.id ?? ""}
-              onChange={(e) => selectWorkspace(e.target.value)}
-            >
-              {me.workspaces.map(({ workspace: ws }) => (
-                <option key={ws.id} value={ws.id}>
-                  {ws.name}
-                </option>
-              ))}
-            </select>
-          )}
-        </div>
-      </div>
+      </Link>
 
       <LinkedInAccountPanel collapsed={collapsed} />
 
-      <div className="mt-5 flex-1 overflow-y-auto px-3 pb-4">
-        {!collapsed && <p className="mb-2 px-2 text-[11px] font-bold uppercase tracking-wider text-slate-500">Menu</p>}
-        <nav className="flex flex-col gap-1">
+      <div className="mt-4 flex-1 overflow-y-auto px-3 pb-4">
+        {!collapsed && (
+          <p className="mb-2 px-3 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">Menu</p>
+        )}
+        <nav className="flex flex-col gap-0.5">
           {NAV.map((item) => {
             const active =
-              pathname === item.href ||
-              (item.href !== "/dashboard" && pathname.startsWith(`${item.href}/`));
+              pathname === item.href || (item.href !== "/dashboard" && pathname.startsWith(`${item.href}/`));
             const Icon = item.icon;
             const badge = item.href === "/inbox" ? unreadInbox : 0;
             return (
-              <Link
-                key={item.href}
-                href={item.href}
-                className={clsx(
-                  "flex items-center gap-3 rounded-lg px-3 py-2.5 text-[14px] font-medium transition-colors",
-                  collapsed && "justify-center px-2",
-                  active ? "bg-white text-ink-950" : "text-slate-300 hover:bg-white/[0.06] hover:text-white",
-                )}
-              >
+              <Link key={item.href} href={item.href} className={navClass(active, collapsed)}>
                 <span className="relative shrink-0">
                   <Icon className="h-[18px] w-[18px]" />
                   {collapsed && badge > 0 && (
-                    <span className="absolute -right-1 -top-1 h-2.5 w-2.5 rounded-full bg-rose-500 ring-2 ring-ink-950" />
+                    <span className="absolute -right-1 -top-1 h-2.5 w-2.5 rounded-full bg-rose-500 ring-2 ring-[#0b0c10]" />
                   )}
                 </span>
                 {!collapsed && <span className="flex-1">{item.label}</span>}
                 {!collapsed && badge > 0 && (
-                  <span
-                    aria-label={`${badge} unread conversations`}
-                    className="min-w-[20px] rounded-full bg-rose-500 px-1.5 py-0.5 text-center text-[11px] font-bold leading-none text-white"
-                  >
+                  <span className="min-w-[20px] rounded-full bg-rose-500 px-1.5 py-0.5 text-center text-[11px] font-bold leading-none text-white">
                     {badge > 99 ? "99+" : badge}
                   </span>
                 )}
@@ -258,77 +219,53 @@ export function AppSidebar({ collapsed }: { collapsed: boolean }) {
 
           <button
             onClick={() => setSettingsOpen((v) => !v)}
-            className={clsx(
-              "mt-1 flex items-center gap-3 rounded-lg px-3 py-2.5 text-left text-[14px] font-medium transition-colors",
-              collapsed && "justify-center px-2",
-              settingsActive ? "bg-white text-ink-950" : "text-slate-300 hover:bg-white/[0.06] hover:text-white",
-            )}
+            className={navClass(settingsActive, collapsed)}
           >
             <IconGear className="h-[18px] w-[18px] shrink-0" />
             {!collapsed && (
               <>
-                <span className="flex-1">Settings</span>
-                <IconChevronDown className={clsx("h-4 w-4 transition-transform", settingsOpen && "rotate-180")} />
+                <span className="flex-1 text-left">Settings</span>
+                <IconChevronRight className={clsx("h-4 w-4 transition-transform", settingsOpen && "rotate-90")} />
               </>
             )}
           </button>
           {!collapsed && settingsOpen && (
-            <div className="ml-[26px] flex flex-col gap-0.5 border-l border-white/10 pl-4">
-              <Link
-                href="/settings"
-                className={clsx(
-                  "rounded-md px-2 py-2 text-[13.5px] font-medium",
-                  pathname === "/settings" ? "text-brand-400" : "text-slate-400 hover:text-white",
-                )}
-              >
-                Settings
-              </Link>
-              <Link
-                href="/admin/settings"
-                className={clsx(
-                  "rounded-md px-2 py-2 text-[13.5px] font-medium",
-                  pathname === "/admin/settings" ? "text-brand-400" : "text-slate-400 hover:text-white",
-                )}
-              >
-                Admin Settings
-              </Link>
-              <Link
-                href="/team"
-                className={clsx(
-                  "rounded-md px-2 py-2 text-[13.5px] font-medium",
-                  pathname === "/team" ? "text-brand-400" : "text-slate-400 hover:text-white",
-                )}
-              >
-                Team
-              </Link>
+            <div className="mb-1 ml-4 flex flex-col border-l border-white/10 pl-3">
+              {SETTINGS_LINKS.map((item) => (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  className={clsx(
+                    "rounded-md px-2 py-2 text-[13px]",
+                    pathname === item.href ? "text-white" : "text-[#a3acba] hover:text-white",
+                  )}
+                >
+                  {item.label}
+                </Link>
+              ))}
             </div>
           )}
 
-          <button
-            onClick={() => setAdvancedOpen((v) => !v)}
-            className={clsx(
-              "mt-1 flex items-center gap-3 rounded-lg px-3 py-2.5 text-left text-[14px] font-medium transition-colors",
-              collapsed && "justify-center px-2",
-              advancedActive ? "bg-white text-ink-950" : "text-slate-300 hover:bg-white/[0.06] hover:text-white",
-            )}
-          >
+          <button onClick={() => setAdvancedOpen((v) => !v)} className={navClass(advancedActive, collapsed)}>
             <IconLayers className="h-[18px] w-[18px] shrink-0" />
             {!collapsed && (
               <>
-                <span className="flex-1">Advanced</span>
-                <IconChevronDown className={clsx("h-4 w-4 transition-transform", advancedOpen && "rotate-180")} />
+                <span className="flex-1 text-left">Advanced</span>
+                <IconChevronRight className={clsx("h-4 w-4 transition-transform", advancedOpen && "rotate-90")} />
               </>
             )}
           </button>
           {!collapsed && advancedOpen && (
-            <div className="ml-[26px] flex flex-col gap-0.5 border-l border-white/10 pl-4">
+            <div className="ml-4 flex flex-col border-l border-white/10 pl-3">
               {ADVANCED_LINKS.map((item) => (
                 <Link
                   key={item.href}
                   href={item.href}
                   className={clsx(
-                    "rounded-md px-2 py-2 text-[13.5px] font-medium",
-                    pathname === item.href ? "text-brand-400" : "text-slate-400 hover:text-white",
+                    "rounded-md px-2 py-2 text-[13px]",
+                    pathname === item.href || pathname.startsWith(`${item.href}/`)
+                      ? "text-white"
+                      : "text-[#a3acba] hover:text-white",
                   )}
                 >
                   {item.label}
@@ -338,19 +275,6 @@ export function AppSidebar({ collapsed }: { collapsed: boolean }) {
           )}
         </nav>
       </div>
-
-      {me && !collapsed && (
-        <div className="border-t border-white/10 px-5 py-4">
-          <p className="truncate text-[12.5px] font-medium text-slate-300">{me.user.full_name || me.user.email}</p>
-          <p className="mb-2.5 truncate text-[11px] text-slate-500">{role} &middot; {me.user.email}</p>
-          <button
-            onClick={() => void signOut()}
-            className="text-[12.5px] font-semibold text-slate-400 hover:text-white"
-          >
-            Sign out
-          </button>
-        </div>
-      )}
     </aside>
   );
 }

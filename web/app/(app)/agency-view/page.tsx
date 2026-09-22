@@ -62,7 +62,7 @@ export default function AgencyViewPage() {
 
       {error && <p className="mb-4 text-sm text-state-bad">{error}</p>}
 
-      <TabBar tabs={TABS} active={tab} onChange={setTab} />
+      <TabBar className="mb-6" tabs={TABS} active={tab} onChange={setTab} />
 
       {tab === "bulk-prospects" && <ProspectsTable workspaceId={workspaceId} />}
       {tab === "leadlist" && <LeadListTable workspaceId={workspaceId} />}

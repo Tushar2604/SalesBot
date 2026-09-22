@@ -39,11 +39,10 @@ async def ensure_running() -> str:
 
         xvfb_path = shutil.which("Xvfb")
         if xvfb_path is None:
-            raise RuntimeError(
-                "Xvfb is not installed in this image — the api container must be "
-                "built from the browser-enabled Dockerfile target for remote-browser "
-                "login to work"
-            )
+            # Windows and bare-metal Linux have a real display; Chromium can
+            # launch headful without a virtual X server.
+            log.info("remote_browser.xvfb_skipped", reason="Xvfb not installed")
+            return DISPLAY
 
         _process = await asyncio.create_subprocess_exec(
             xvfb_path,

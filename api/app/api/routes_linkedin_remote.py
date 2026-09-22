@@ -17,6 +17,9 @@ from typing import Annotated
 
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect, status
+from redis.exceptions import RedisError
+
+from app.core import local_cache
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -111,11 +114,19 @@ async def start_remote_session(
 
 
 async def _consume_ticket_once(jti: str, ttl_seconds: int) -> bool:
+    key = f"ws:ticket:{jti}"
+    ttl = max(ttl_seconds, 1)
     client: aioredis.Redis = aioredis.from_url(  # type: ignore[no-untyped-call]
-        settings.redis_url, decode_responses=True
+        settings.redis_url,
+        decode_responses=True,
+        socket_connect_timeout=1,
+        socket_timeout=1,
     )
     try:
-        return bool(await client.set(f"ws:ticket:{jti}", "1", nx=True, ex=max(ttl_seconds, 1)))
+        return bool(await client.set(key, "1", nx=True, ex=ttl))
+    except (RedisError, OSError, ConnectionError):
+        log.warning("remote_browser.ticket_redis_unavailable", fallback="local_cache")
+        return local_cache.set_nx(key, "1", ttl)
     finally:
         await client.aclose()
 
@@ -145,8 +156,13 @@ async def remote_session_ws(websocket: WebSocket, ticket: Annotated[str, Query()
     jti = claims["jti"]
     remaining = max(int(claims["exp"]) - int(claims["iat"]), 1)
 
-    if not await _consume_ticket_once(jti, remaining):
-        await websocket.close(code=4000, reason="ticket already used")
+    try:
+        if not await _consume_ticket_once(jti, remaining):
+            await websocket.close(code=4000, reason="ticket already used")
+            return
+    except Exception as exc:
+        log.error("remote_browser.ticket_failed", error=str(exc))
+        await websocket.close(code=4004, reason="could not verify the session ticket")
         return
 
     async with AsyncSessionLocal() as db:
@@ -191,8 +207,8 @@ async def remote_session_ws(websocket: WebSocket, ticket: Annotated[str, Query()
 
     async def _writer() -> None:
         while True:
-            frame_task = asyncio.ensure_future(session.frame_queue.get())
-            status_task = asyncio.ensure_future(session.status_queue.get())
+            frame_task = asyncio.ensure_future(session.next_frame())
+            status_task = asyncio.ensure_future(session.next_status())
             done, pending = await asyncio.wait(
                 {frame_task, status_task}, return_when=asyncio.FIRST_COMPLETED
             )

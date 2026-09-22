@@ -28,7 +28,7 @@ export function LeadListTable({ workspaceId }: { workspaceId: string }) {
       <div className="mb-4 flex justify-end">
         <button
           onClick={() => setImporting(true)}
-          className="flex items-center gap-1.5 rounded-lg bg-brand-600 px-4 py-2.5 text-[13.5px] font-bold text-white hover:bg-brand-700"
+          className="btn-primary"
         >
           Create New Lead List
         </button>

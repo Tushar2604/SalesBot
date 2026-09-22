@@ -135,6 +135,17 @@ class Settings(BaseSettings):
     def is_production(self) -> bool:
         return self.environment == "production"
 
+    @property
+    def cors_origins(self) -> list[str]:
+        """localhost and 127.0.0.1 are different origins to the browser."""
+        base = self.web_base_url.rstrip("/")
+        origins = {base}
+        if "://localhost" in base:
+            origins.add(base.replace("://localhost", "://127.0.0.1"))
+        if "://127.0.0.1" in base:
+            origins.add(base.replace("://127.0.0.1", "://localhost"))
+        return sorted(origins)
+
 
 @lru_cache
 def get_settings() -> Settings:

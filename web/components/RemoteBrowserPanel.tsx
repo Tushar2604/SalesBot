@@ -55,7 +55,15 @@ export function RemoteBrowserPanel({
         onStatus: (status) => applyStatus(status),
         onClose: (code, reason) => {
           setPhase((prev) => (prev === "success" ? prev : "closed"));
-          setDetail(reason || (code === 1000 ? "Session ended." : `Connection closed (${code}).`));
+          const fallback =
+            code === 1000
+              ? "Session ended."
+              : code === 4003
+                ? "Could not start Chromium. Retry in a moment."
+                : code === 1006
+                ? "The browser session dropped before Chromium started. Retry in a moment."
+                : `Connection closed (${code}).`;
+          setDetail(reason || fallback);
         },
       });
       socketRef.current = socket;

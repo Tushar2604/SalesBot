@@ -87,12 +87,10 @@ function CampaignsTable({
   campaigns,
   loading,
   accounts,
-  onCreate,
 }: {
   campaigns: Campaign[];
   loading: boolean;
   accounts: LinkedInAccount[];
-  onCreate: () => void;
 }) {
   const [search, setSearch] = useState("");
   const filtered = campaigns.filter((c) => c.name.toLowerCase().includes(search.trim().toLowerCase()));
@@ -109,12 +107,6 @@ function CampaignsTable({
             className="input pl-9"
           />
         </div>
-        {accounts.length > 0 && (
-          <button onClick={onCreate} className="ml-auto flex shrink-0 items-center gap-1.5 rounded-lg bg-brand-600 px-4 py-2.5 text-[13.5px] font-bold text-white hover:bg-brand-700">
-            Create Campaign
-            <IconPlus className="h-4 w-4" />
-          </button>
-        )}
       </div>
 
       <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
@@ -267,8 +259,16 @@ export default function CampaignsPage() {
   if (!workspaceId) return <p className="text-sm text-slate-500">Select a workspace.</p>;
 
   return (
-    <div className="mx-auto max-w-6xl">
-      <TabBar tabs={PAGE_TABS} active={pageTab} onChange={setPageTab} />
+    <div>
+      <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
+        <TabBar tabs={PAGE_TABS} active={pageTab} onChange={setPageTab} />
+        {pageTab === "campaigns" && accounts.length > 0 && (
+          <button onClick={() => setWizardOpen(true)} className="btn-primary shrink-0">
+            Create Campaign
+            <IconPlus className="h-4 w-4" />
+          </button>
+        )}
+      </div>
 
       {error && (
         <p role="alert" className="mb-6 rounded-md border border-state-bad/40 bg-state-bad/10 px-4 py-3 text-sm text-state-bad">
@@ -291,7 +291,7 @@ export default function CampaignsPage() {
       {pageTab === "campaigns" && <QuotaPanel quotas={quotas} />}
 
       {pageTab === "campaigns" && (
-        <CampaignsTable campaigns={campaigns} loading={loading} accounts={accounts} onCreate={() => setWizardOpen(true)} />
+        <CampaignsTable campaigns={campaigns} loading={loading} accounts={accounts} />
       )}
       {pageTab === "prospects" && <ProspectsTable workspaceId={workspaceId} />}
       {pageTab === "leadlist" && <LeadListTable workspaceId={workspaceId} />}

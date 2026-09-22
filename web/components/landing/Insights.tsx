@@ -1,53 +1,42 @@
 const POSTS = [
   {
-    tag: "LinkedIn",
-    title: "How to find clients on LinkedIn (5 different ways)",
-    read: "6 min read",
-    color: "from-brand-400 to-brand-600",
+    title: "25 LinkedIn Connection Messages That Get Accepted",
+    date: "September 18, 2026",
+    color: "from-sky-400 to-indigo-500",
   },
   {
-    tag: "Bots & Automation",
-    title: "LinkedIn bots we used: Pricing for 2026",
-    read: "8 min read",
-    color: "from-rose-400 to-rose-600",
+    title: "Best LinkedIn Automation for SaaS: 10 Tools That Actually Work",
+    date: "September 18, 2026",
+    color: "from-violet-400 to-fuchsia-500",
   },
   {
-    tag: "Strategy",
-    title: "Manage multiple LinkedIn accounts without banned",
-    read: "5 min read",
-    color: "from-amber-400 to-amber-600",
+    title: "Waalaxy Review 2026: Pricing, Features & Verdict",
+    date: "September 18, 2026",
+    color: "from-amber-400 to-orange-500",
   },
 ];
 
 export function Insights() {
   return (
-    <section id="insights" className="bg-white py-20 sm:py-28">
-      <div className="mx-auto max-w-7xl px-5 sm:px-8">
+    <section id="insights" className="bg-white py-16 sm:py-24">
+      <div className="landing-wrap">
         <div className="flex items-end justify-between">
-          <h2 className="font-display text-3xl font-extrabold tracking-tight text-ink-950 sm:text-4xl">
-            Thoughts &amp; insights
-          </h2>
-          <a href="#insights" className="hidden text-[14px] font-bold text-brand-600 hover:text-brand-700 sm:inline-flex">
-            Read all blogs &rarr;
+          <h2 className="text-[28px] font-semibold tracking-tight text-ink-950 sm:text-[36px]">Thoughts &amp; Insights</h2>
+          <a href="#insights" className="hidden text-[14px] font-semibold text-sky-600 hover:text-sky-700 sm:inline-flex">
+            Read all blogs
           </a>
         </div>
-
         <div className="mt-10 grid gap-6 md:grid-cols-3">
           {POSTS.map((p) => (
             <a
               key={p.title}
               href="#insights"
-              className="group overflow-hidden rounded-2xl border border-slate-200 bg-white transition-shadow hover:shadow-lg hover:shadow-slate-200/60"
+              className="group overflow-hidden rounded-[22px] border border-slate-200 bg-white transition-shadow hover:shadow-card"
             >
-              <div className={`flex h-40 items-center justify-center bg-gradient-to-br ${p.color}`}>
-                <span className="font-display text-3xl font-black text-white/90">SR</span>
-              </div>
-              <div className="p-6">
-                <span className="text-[12px] font-bold uppercase tracking-wide text-brand-600">{p.tag}</span>
-                <h3 className="mt-2 font-display text-[17px] font-bold leading-snug tracking-tight text-ink-950 group-hover:text-brand-600">
-                  {p.title}
-                </h3>
-                <p className="mt-3 text-[12.5px] font-medium text-slate-400">{p.read}</p>
+              <div className={`h-40 bg-gradient-to-br ${p.color}`} />
+              <div className="p-5">
+                <h3 className="text-[16px] font-semibold leading-snug text-ink-950 group-hover:text-sky-700">{p.title}</h3>
+                <p className="mt-3 text-[12.5px] text-slate-400">{p.date}</p>
               </div>
             </a>
           ))}

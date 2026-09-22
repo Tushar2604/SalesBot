@@ -207,7 +207,7 @@ export default function SettingsPage() {
         </div>
       ) : (
         <>
-          <TabBar tabs={TABS} active={tab} onChange={setTab} />
+          <TabBar className="mb-6" tabs={TABS} active={tab} onChange={setTab} />
 
           {tab === "daily-limit" && account && (
             <div>

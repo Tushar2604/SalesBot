@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useSession } from "@/lib/session";
 
 export function AccountMenu() {
-  const { me, signOut } = useSession();
+  const { me, workspace, selectWorkspace, signOut } = useSession();
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -24,7 +24,7 @@ export function AccountMenu() {
       <button
         onClick={() => setOpen((v) => !v)}
         aria-label="Account menu"
-        className="flex h-8 w-8 items-center justify-center rounded-full bg-ink-950 text-[11px] font-bold text-white"
+        className="flex h-9 w-9 items-center justify-center rounded-full bg-[#111827] text-[12px] font-semibold text-white"
       >
         {initial}
       </button>
@@ -37,6 +37,23 @@ export function AccountMenu() {
             </p>
             <p className="truncate text-[12px] text-slate-500">{me?.user.email}</p>
           </div>
+          {me && me.workspaces.length > 1 && (
+            <div className="border-b border-slate-100 px-4 py-3">
+              <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-400">Workspace</p>
+              <select
+                aria-label="Switch workspace"
+                className="input py-1.5 text-[13px]"
+                value={workspace?.id ?? ""}
+                onChange={(e) => selectWorkspace(e.target.value)}
+              >
+                {me.workspaces.map(({ workspace: ws }) => (
+                  <option key={ws.id} value={ws.id}>
+                    {ws.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
           <div className="flex flex-col py-1.5">
             <Link
               href="/settings"

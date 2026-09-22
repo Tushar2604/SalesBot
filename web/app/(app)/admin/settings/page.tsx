@@ -86,7 +86,7 @@ export default function AdminSettingsPage() {
     <div className="mx-auto max-w-6xl">
       <h1 className="mb-6 text-2xl font-semibold text-ink-950">Admin Settings</h1>
 
-      <TabBar tabs={TABS} active={tab} onChange={setTab} />
+      <TabBar className="mb-6" tabs={TABS} active={tab} onChange={setTab} />
 
       {tab === "manage-team" && <ManageTeamTab workspaceId={workspaceId} />}
 

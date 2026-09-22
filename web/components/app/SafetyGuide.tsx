@@ -186,10 +186,10 @@ export function SafetyGuide() {
     <>
       <button
         onClick={() => setOpen(true)}
-        className="hidden items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-[12.5px] font-semibold text-emerald-700 hover:bg-emerald-100 sm:flex"
+        aria-label="Stay safe"
+        className="hidden h-9 w-9 items-center justify-center rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50 hover:text-ink-950 sm:flex"
       >
         <IconShield className="h-4 w-4" />
-        Stay Safe
       </button>
 
       {open && (

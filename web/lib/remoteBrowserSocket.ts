@@ -45,6 +45,9 @@ export class RemoteBrowserSocket {
     };
 
     this.ws.onclose = (event: CloseEvent) => listeners.onClose(event.code, event.reason);
+    this.ws.onerror = () => {
+      // onclose always follows; keep this so failed handshakes still notify.
+    };
   }
 
   private send(message: Record<string, unknown>): void {

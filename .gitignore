@@ -5,6 +5,7 @@
 # Python
 __pycache__/
 *.py[cod]
+*.egg-info/
 .venv/
 venv/
 .pytest_cache/
@@ -26,6 +27,8 @@ test-results/
 
 # Local data
 .docker-data/
+.local-pg/
+.local-redis/
 *.sqlite3
 
 # Editors / OS

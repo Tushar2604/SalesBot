@@ -11,20 +11,28 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import queue
+import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 import redis.asyncio as aioredis
+from redis.exceptions import RedisError
 from sqlalchemy import select
 
 from app.config import settings
+from app.core import local_cache
 from app.core.logging import get_logger
 from app.db import AsyncSessionLocal
 from app.linkedin import proxy as proxy_mod
 from app.linkedin.remote_browser import browser_fingerprint, stealth, xvfb
 from app.linkedin.remote_browser.cdp_relay import CdpRelay
-from app.linkedin.remote_browser.playwright_pool import get_playwright, to_playwright_proxy
+from app.linkedin.remote_browser.playwright_pool import (
+    get_playwright,
+    run_on_playwright_loop,
+    to_playwright_proxy,
+)
 from app.linkedin.remote_browser.protocol import KeyInput, MouseInput, StatusMessage, StatusState
 from app.models.linkedin import LinkedInAccount
 from app.scheduler.locks import slot_key
@@ -39,7 +47,16 @@ log = get_logger(__name__)
 _SLOT_HEARTBEAT_SECONDS = 60
 _SLOT_TTL_SECONDS = 180
 _LOGIN_POLL_SECONDS = 1.5
-_AUTHENTICATED_URL_MARKERS = ("linkedin.com/feed", "linkedin.com/mynetwork", "linkedin.com/in/")
+_AUTHENTICATED_URL_MARKERS = (
+    "linkedin.com/feed",
+    "linkedin.com/mynetwork",
+    "linkedin.com/in/",
+    "linkedin.com/checkpoint",
+    "linkedin.com/check/",
+    "linkedin.com/notifications",
+    "linkedin.com/jobs",
+    "linkedin.com/messaging",
+)
 
 
 class RemoteBrowserError(Exception):
@@ -62,36 +79,55 @@ class LaunchFailed(RemoteBrowserError):
 
 def _redis() -> aioredis.Redis:
     client: aioredis.Redis = aioredis.from_url(  # type: ignore[no-untyped-call]
-        settings.redis_url, decode_responses=True
+        settings.redis_url,
+        decode_responses=True,
+        socket_connect_timeout=1,
+        socket_timeout=1,
     )
     return client
 
 
 async def _acquire_slot(account_id: uuid.UUID) -> str:
-    client = _redis()
     token = str(uuid.uuid4())
+    key = slot_key(account_id)
+    client = _redis()
     try:
-        if not await client.set(slot_key(account_id), token, nx=True, ex=_SLOT_TTL_SECONDS):
+        if not await client.set(key, token, nx=True, ex=_SLOT_TTL_SECONDS):
             raise SlotBusy(f"account {account_id} is already acting")
+        return token
+    except (RedisError, OSError, ConnectionError):
+        log.warning("remote_browser.slot_redis_unavailable", fallback="local_cache")
+        if not local_cache.set_nx(key, token, _SLOT_TTL_SECONDS):
+            raise SlotBusy(f"account {account_id} is already acting") from None
+        return token
     finally:
         await client.aclose()
-    return token
 
 
 async def _renew_slot(account_id: uuid.UUID, token: str) -> None:
+    key = slot_key(account_id)
     client = _redis()
     try:
-        if await client.get(slot_key(account_id)) == token:
-            await client.expire(slot_key(account_id), _SLOT_TTL_SECONDS)
+        if await client.get(key) == token:
+            await client.expire(key, _SLOT_TTL_SECONDS)
+            return
+    except (RedisError, OSError, ConnectionError):
+        local_cache.expire(key, _SLOT_TTL_SECONDS)
+        return
     finally:
         await client.aclose()
 
 
 async def _release_slot(account_id: uuid.UUID, token: str) -> None:
+    key = slot_key(account_id)
     client = _redis()
     try:
-        if await client.get(slot_key(account_id)) == token:
-            await client.delete(slot_key(account_id))
+        if await client.get(key) == token:
+            await client.delete(key)
+            return
+    except (RedisError, OSError, ConnectionError):
+        local_cache.delete_if_value(key, token)
+        return
     finally:
         await client.aclose()
 
@@ -105,30 +141,39 @@ class RemoteBrowserSession:
     page: object
     relay: CdpRelay
     slot_token: str
-    frame_queue: asyncio.Queue[bytes] = field(default_factory=lambda: asyncio.Queue(maxsize=1))
-    status_queue: asyncio.Queue[StatusMessage] = field(default_factory=asyncio.Queue)
+    frame_queue: queue.Queue[bytes] = field(default_factory=lambda: queue.Queue(maxsize=2))
+    status_queue: queue.Queue[StatusMessage] = field(default_factory=queue.Queue)
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     last_input_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     _tasks: list[asyncio.Task[None]] = field(default_factory=list)
-    _closed: asyncio.Event = field(default_factory=asyncio.Event)
+    _closed: threading.Event = field(default_factory=threading.Event)
 
     def touch(self) -> None:
         self.last_input_at = datetime.now(UTC)
 
     async def push_status(self, state: StatusState, detail: str = "") -> None:
-        await self.status_queue.put(StatusMessage(state=state, detail=detail))
+        self.status_queue.put(StatusMessage(state=state, detail=detail))
 
-    async def push_frame(self, data: bytes) -> None:
+    def push_frame(self, data: bytes) -> None:
         # Keep only the latest frame: a slow WS consumer should see the newest
         # screen state next, not catch up through a backlog of stale ones.
-        if self.frame_queue.full():
-            with contextlib.suppress(asyncio.QueueEmpty):
+        try:
+            self.frame_queue.put_nowait(data)
+        except queue.Full:
+            with contextlib.suppress(queue.Empty):
                 self.frame_queue.get_nowait()
-        await self.frame_queue.put(data)
+            with contextlib.suppress(queue.Full):
+                self.frame_queue.put_nowait(data)
+
+    async def next_frame(self) -> bytes:
+        return await asyncio.to_thread(self.frame_queue.get)
+
+    async def next_status(self) -> StatusMessage:
+        return await asyncio.to_thread(self.status_queue.get)
 
     async def dispatch_input(self, message: MouseInput | KeyInput) -> None:
         self.touch()
-        await self.relay.dispatch_input(message)
+        await run_on_playwright_loop(self.relay.dispatch_input(message))
 
 
 class RemoteBrowserManager:
@@ -151,8 +196,9 @@ class RemoteBrowserManager:
             raise
         except Exception as exc:
             await _release_slot(account_id, slot_token)
-            log.warning("remote_browser.launch_failed", account_id=str(account_id), error=str(exc))
-            raise LaunchFailed(str(exc)) from exc
+            detail = str(exc).strip() or type(exc).__name__
+            log.warning("remote_browser.launch_failed", account_id=str(account_id), error=detail)
+            raise LaunchFailed(detail) from exc
 
         async with self._lock:
             self._sessions[str(account_id)] = session
@@ -172,14 +218,14 @@ class RemoteBrowserManager:
         for task in session._tasks:
             task.cancel()
         try:
-            await session.relay.stop_screencast()
+            await run_on_playwright_loop(session.relay.stop_screencast())
         except Exception as exc:  # session may already be gone
             log.debug(
                 "remote_browser.stop_relay_failed", account_id=str(account_id), error=str(exc)
             )
         for closer in (session.context, session.browser):
             try:
-                await closer.close()  # type: ignore[attr-defined]
+                await run_on_playwright_loop(closer.close())  # type: ignore[attr-defined]
             except Exception as exc:  # already closed/crashed is fine during cleanup
                 log.debug(
                     "remote_browser.close_failed", account_id=str(account_id), error=str(exc)
@@ -222,7 +268,28 @@ class RemoteBrowserManager:
         viewport = browser_fingerprint.viewport(browser_fp)
 
         await xvfb.ensure_running()
-        pw = await get_playwright()
+        return await run_on_playwright_loop(
+            self._open_chromium(
+                account_id, workspace_id, slot_token, browser_fp, viewport, resolved
+            )
+        )
+
+    async def _open_chromium(
+        self,
+        account_id: uuid.UUID,
+        workspace_id: uuid.UUID,
+        slot_token: str,
+        browser_fp: dict,
+        viewport: dict,
+        resolved: object,
+    ) -> RemoteBrowserSession:
+        try:
+            pw = await get_playwright()
+        except ModuleNotFoundError as exc:
+            raise LaunchFailed(
+                "Playwright is not installed. Run: pip install '.[browser]' && playwright install chromium"
+            ) from exc
+
         launch_kwargs: dict[str, object] = {
             "headless": False,
             "args": stealth.LAUNCH_ARGS,
@@ -230,7 +297,17 @@ class RemoteBrowserManager:
         if resolved is not None:
             launch_kwargs["proxy"] = to_playwright_proxy(resolved)
 
-        browser = await pw.chromium.launch(**launch_kwargs)  # type: ignore[attr-defined]
+        try:
+            browser = await pw.chromium.launch(**launch_kwargs)  # type: ignore[attr-defined]
+        except Exception as headful_exc:
+            log.warning("remote_browser.headful_failed", error=str(headful_exc))
+            launch_kwargs["headless"] = True
+            try:
+                browser = await pw.chromium.launch(**launch_kwargs)  # type: ignore[attr-defined]
+            except Exception as exc:
+                raise LaunchFailed(
+                    "Could not start Chromium. Run `playwright install chromium` in the API venv."
+                ) from exc
         context = await browser.new_context(
             viewport=viewport,
             user_agent=browser_fingerprint.user_agent(browser_fp),
@@ -253,7 +330,7 @@ class RemoteBrowserManager:
         )
 
         async def _on_frame(data: bytes) -> None:
-            await session.push_frame(data)
+            session.push_frame(data)
 
         await relay.start_screencast(
             width=viewport["width"], height=viewport["height"], on_frame=_on_frame
@@ -299,15 +376,22 @@ class RemoteBrowserManager:
             pass
 
     async def _check_logged_in(self, session: RemoteBrowserSession) -> bool:
-        cookies = await session.context.cookies()  # type: ignore[attr-defined]
+        async def _read() -> tuple[list, str]:
+            cookies = await session.context.cookies()  # type: ignore[attr-defined]
+            return cookies, session.page.url  # type: ignore[attr-defined]
+
+        cookies, url = await run_on_playwright_loop(_read())
         has_li_at = any(c["name"] == "li_at" and c["value"] for c in cookies)
-        if not has_li_at:
-            return False
-        url = session.page.url  # type: ignore[attr-defined]
+        if has_li_at:
+            log.info("remote_browser.session_cookie_seen", url=url)
+            return True
         return any(marker in url for marker in _AUTHENTICATED_URL_MARKERS)
 
     async def _finish_login(self, session: RemoteBrowserSession) -> None:
-        cookies = await session.context.cookies()  # type: ignore[attr-defined]
+        async def _read_cookies() -> list:
+            return await session.context.cookies()  # type: ignore[attr-defined]
+
+        cookies = await run_on_playwright_loop(_read_cookies())
         li_at = next((c["value"] for c in cookies if c["name"] == "li_at"), "")
         jsessionid = next((c["value"] for c in cookies if c["name"] == "JSESSIONID"), "")
         if not li_at:
@@ -319,11 +403,24 @@ class RemoteBrowserManager:
         sealed = seal_for_transit(
             {"li_at": li_at, "jsessionid": jsessionid.strip('"'), "cookies": linkedin_cookies}
         )
-        celery_app.send_task(
-            "linkedin.auth.connect_cookie",
-            args=[str(session.account_id), sealed],
-            queue="linkedin.action",
-        )
+        from app.worker.tasks.linkedin_auth import connect_cookie
+
+        if settings.environment == "development":
+            await asyncio.to_thread(
+                lambda: connect_cookie.apply(args=[str(session.account_id), sealed]).get()
+            )
+        else:
+            try:
+                celery_app.send_task(
+                    "linkedin.auth.connect_cookie",
+                    args=[str(session.account_id), sealed],
+                    queue="linkedin.action",
+                )
+            except Exception as exc:
+                log.warning("remote_browser.celery_unavailable", error=str(exc))
+                await asyncio.to_thread(
+                    lambda: connect_cookie.apply(args=[str(session.account_id), sealed]).get()
+                )
         await session.push_status("login_success", "signed in — finishing setup")
         log.info("remote_browser.login_success", account_id=str(session.account_id))
         # Grace period so the frontend can show the success state before the

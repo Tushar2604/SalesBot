@@ -13,6 +13,7 @@ export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [remember, setRemember] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -25,7 +26,7 @@ export default function LoginPage() {
       await refresh();
       router.push("/dashboard");
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not sign in");
+      setError(err instanceof ApiError ? err.message : "Could not sign in. Is the API running?");
     } finally {
       setBusy(false);
     }
@@ -33,20 +34,21 @@ export default function LoginPage() {
 
   return (
     <AuthShell
-      title="Welcome back"
-      switchPrompt="New to SalesBot?"
+      title="Sign in to your account"
+      switchPrompt="Don't have an account?"
       switchHref="/signup"
-      switchLabel="Create an account"
+      switchLabel="Sign up for a free trial"
     >
       <form onSubmit={onSubmit} className="space-y-5">
         <div>
-          <label className="mb-1.5 block text-[14px] font-bold text-ink-950" htmlFor="email">
+          <label className="label" htmlFor="email">
             Email address
           </label>
           <input
             id="email"
             type="email"
-            className="w-full rounded-xl border border-slate-200 bg-brand-50/40 px-4 py-3 text-[14.5px] text-ink-950 placeholder:text-slate-400 focus:border-brand-400 focus:outline-none focus:ring-1 focus:ring-brand-400"
+            className="input"
+            placeholder="Enter your email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             autoComplete="email"
@@ -55,14 +57,15 @@ export default function LoginPage() {
         </div>
 
         <div>
-          <label className="mb-1.5 block text-[14px] font-bold text-ink-950" htmlFor="password">
+          <label className="label" htmlFor="password">
             Password
           </label>
           <div className="relative">
             <input
               id="password"
               type={showPassword ? "text" : "password"}
-              className="w-full rounded-xl border border-slate-200 bg-brand-50/40 px-4 py-3 pr-11 text-[14.5px] text-ink-950 placeholder:text-slate-400 focus:border-brand-400 focus:outline-none focus:ring-1 focus:ring-brand-400"
+              className="input pr-11"
+              placeholder="Enter your password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               autoComplete="current-password"
@@ -79,17 +82,26 @@ export default function LoginPage() {
           </div>
         </div>
 
+        <div className="flex items-center justify-between text-[13.5px]">
+          <label className="flex items-center gap-2 font-medium text-ink-950">
+            <input
+              type="checkbox"
+              checked={remember}
+              onChange={(e) => setRemember(e.target.checked)}
+              className="h-4 w-4 rounded border-slate-300 text-accent"
+            />
+            Remember me
+          </label>
+          <span className="text-slate-400">Forgot password?</span>
+        </div>
+
         {error && (
           <p role="alert" className="text-sm text-state-bad">
             {error}
           </p>
         )}
 
-        <button
-          type="submit"
-          className="flex w-full items-center justify-center gap-2 rounded-xl bg-brand-600 py-3.5 text-[15px] font-bold text-white hover:bg-brand-700 disabled:opacity-50"
-          disabled={busy}
-        >
+        <button type="submit" className="btn-primary h-12 w-full text-[15px]" disabled={busy}>
           {busy ? "Signing in…" : "Sign in"}
           {!busy && <IconArrowRight className="h-4 w-4" />}
         </button>

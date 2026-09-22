@@ -1,9 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { IconArrowRight, IconChevronDown } from "@/components/app/icons";
+import { IconArrowRight } from "@/components/app/icons";
 import { useLocalState } from "@/lib/localSettings";
 import { ONBOARDING_STEPS } from "@/lib/onboarding";
+import { trialDaysLeft } from "@/components/app/AppTopbar";
+import { useSession } from "@/lib/session";
 
 const STEPS = ONBOARDING_STEPS;
 
@@ -16,7 +18,9 @@ export function GettingStartedCard({
   onContinue: () => void;
   doneCount?: number;
 }) {
+  const { me } = useSession();
   const [hidden, setHidden] = useLocalState(workspaceId, "getting-started-hidden", false);
+  const days = trialDaysLeft(me?.user.created_at);
 
   if (doneCount >= STEPS.length) return null;
 
@@ -24,7 +28,7 @@ export function GettingStartedCard({
     return (
       <button
         onClick={() => setHidden(false)}
-        className="mb-6 flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-[13px] font-semibold text-slate-600 hover:border-slate-300"
+        className="mb-6 flex items-center gap-2 text-[13.5px] font-medium text-slate-500 hover:text-ink-950"
       >
         Show getting started guide
       </button>
@@ -32,45 +36,50 @@ export function GettingStartedCard({
   }
 
   return (
-    <div className="card relative mb-6 overflow-hidden">
+    <div className="relative mb-7 overflow-hidden rounded-2xl border border-slate-100 bg-white px-6 py-6 shadow-[0_8px_30px_-18px_rgba(15,23,42,0.18)]">
       <div
         aria-hidden
-        className="pointer-events-none absolute -right-6 -top-10 h-40 w-56 rotate-[18deg] rounded-[2rem] bg-gradient-to-br from-brand-400 to-violet-400 opacity-90"
+        className="pointer-events-none absolute -right-6 -top-8 h-28 w-48 rotate-[28deg] rounded-3xl bg-[#7ad8ff]"
       />
       <div
         aria-hidden
-        className="pointer-events-none absolute -right-2 top-6 h-24 w-40 rotate-[18deg] rounded-[1.5rem] bg-gradient-to-br from-violet-500 to-brand-600 opacity-80"
+        className="pointer-events-none absolute right-10 top-10 h-20 w-36 rotate-[28deg] rounded-3xl bg-[#7c6bff]"
+      />
+      <div
+        aria-hidden
+        className="pointer-events-none absolute -right-10 bottom-2 h-16 w-40 rotate-[28deg] rounded-3xl bg-[#3bdcff]"
       />
 
-      <h2 className="font-display text-xl font-extrabold tracking-tight text-ink-950">Getting Started guide</h2>
+      <h2 className="text-[22px] font-semibold tracking-tight text-ink-950">Getting Started guide</h2>
 
-      <div className="mt-4 flex gap-1.5">
+      <div className="mt-4 flex max-w-xl gap-2">
         {STEPS.map((_, i) => (
           <span
             key={i}
-            className={`h-1.5 flex-1 rounded-full ${i < doneCount ? "bg-brand-600" : "bg-slate-200"}`}
+            className={`h-1.5 flex-1 rounded-full ${i < doneCount ? "bg-accent" : "bg-slate-200"}`}
           />
         ))}
       </div>
 
-      <p className="mt-4 text-[14px] font-semibold text-ink-950">Step {doneCount + 1}: {STEPS[doneCount] ?? STEPS[STEPS.length - 1]}</p>
+      <p className="mt-4 max-w-2xl text-[14px] font-medium text-[#ef4444]">
+        You have {days} days remaining in your trial. {STEPS[doneCount] ?? STEPS[0]} to get started.
+      </p>
 
-      <div className="mt-4 flex items-center gap-3">
+      <div className="mt-5 flex items-center gap-3">
         <button
           onClick={() => setHidden(true)}
-          className="flex items-center gap-1.5 rounded-full border border-slate-200 px-4 py-2 text-[13px] font-semibold text-slate-600 hover:border-slate-300"
+          className="rounded-xl border border-slate-200 bg-white px-5 py-2.5 text-[14px] font-medium text-slate-600 hover:border-slate-300"
         >
-          <IconChevronDown className="h-3.5 w-3.5 rotate-180" />
           Hide
         </button>
         <button
           onClick={onContinue}
-          className="flex items-center gap-1.5 rounded-full bg-brand-600 px-4 py-2 text-[13px] font-bold text-white hover:bg-brand-700"
+          className="inline-flex items-center gap-2 rounded-xl bg-accent px-5 py-2.5 text-[14px] font-medium text-white hover:bg-accent-hover"
         >
           Continue Setup
           <IconArrowRight className="h-3.5 w-3.5" />
         </button>
-        <Link href="/guide" className="text-[13px] font-semibold text-brand-600 hover:underline">
+        <Link href="/guide" className="text-[13px] font-semibold text-accent hover:underline">
           Full walkthrough
         </Link>
       </div>
