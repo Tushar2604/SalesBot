@@ -1,0 +1,38 @@
+# HTTPS certificates are issued and renewed automatically (Let's Encrypt).
+# Both domains must already point (DNS A record) at this server.
+{
+	email {$ACME_EMAIL}
+}
+
+{$APP_DOMAIN} {
+	encode zstd gzip
+
+	# API, including the sign-in window's WebSocket (Caddy upgrades it itself).
+	handle /api/* {
+		reverse_proxy api:8000 {
+			# A sign-in session stays open for up to 15 minutes.
+			transport http {
+				read_timeout 20m
+				write_timeout 20m
+			}
+		}
+	}
+
+	handle {
+		reverse_proxy web:3000
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+}
+
+# Signed media links only. The bucket is private: without a valid signature
+# MinIO refuses the request. The Host header is passed through unchanged, which
+# is what the signature was made for.
+{$FILES_DOMAIN} {
+	reverse_proxy minio:9000
+}

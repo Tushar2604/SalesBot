@@ -15,7 +15,9 @@ import { ApiError, linkedinApi, type LinkedInAccount } from "@/lib/api";
 import { campaignsApi, leadsApi, type LeadList, type StepInput } from "@/lib/outreach-api";
 import { CsvImportDialog } from "@/components/CsvImportDialog";
 import { SequenceBuilder, defaultSequence } from "@/components/SequenceBuilder";
-import { IconCheckCircle, IconClose } from "@/components/app/icons";
+import { useRiskGuard } from "@/components/RiskGuard";
+import { IconCheckCircle, IconClose, IconSparkle } from "@/components/app/icons";
+import { AssistantSelect, useAssistantProfiles } from "@/components/assistant/Assistants";
 import clsx from "clsx";
 
 type Step = "details" | "people" | "review";
@@ -45,6 +47,9 @@ export function CampaignWizard({
   const [accountId, setAccountId] = useState(accounts[0]?.id ?? "");
   const [stopOnReply, setStopOnReply] = useState(true);
   const [steps, setSteps] = useState<StepInput[]>(initialSteps ?? defaultSequence());
+  const [assistantId, setAssistantId] = useState<string | null>(null);
+  const [brief, setBrief] = useState("");
+  const { profiles } = useAssistantProfiles(workspaceId);
 
   const [lists, setLists] = useState<LeadList[]>([]);
   const [selectedListId, setSelectedListId] = useState<string>("");
@@ -61,17 +66,28 @@ export function CampaignWizard({
   const stepIndex = STEPS.findIndex((s) => s.key === step);
   const detailsValid = name.trim().length > 0 && Boolean(accountId);
 
+  const { guarded } = useRiskGuard();
+
   async function finish() {
     setError(null);
     setProblems([]);
     setBusy(true);
     try {
-      const campaign = await campaignsApi.create(workspaceId, {
-        name,
-        linkedin_account_id: accountId,
-        steps,
-        stop_on_reply: stopOnReply,
-      });
+      const campaign = await guarded((ack) =>
+        campaignsApi.create(
+          workspaceId,
+          {
+            name,
+            linkedin_account_id: accountId,
+            steps,
+            stop_on_reply: stopOnReply,
+            assistant_id: assistantId,
+            ai_brief: brief,
+          },
+          ack,
+        ),
+      );
+      if (!campaign) return; // kept safe: back to the sequence to change the timing
       if (selectedListId) {
         await campaignsApi.enroll(workspaceId, campaign.id, { list_id: selectedListId });
       }
@@ -154,6 +170,38 @@ export function CampaignWizard({
                   <input type="checkbox" checked={stopOnReply} onChange={(e) => setStopOnReply(e.target.checked)} />
                   Stop a lead&apos;s sequence the moment they reply
                 </label>
+
+                <div className="rounded-lg border border-violet-200 bg-violet-50/40 p-4">
+                  <p className="mb-1 flex items-center gap-1.5 text-[13.5px] font-semibold text-violet-800">
+                    <IconSparkle className="h-4 w-4" /> AI assistant for this campaign
+                  </p>
+                  <p className="mb-3 text-xs text-slate-600">
+                    Who answers when these leads reply: its voice, what it asks and which SOPs it reads. Use a
+                    different assistant for each purpose, e.g. HR hiring vs. your own team.
+                  </p>
+                  <label className="label">Assistant</label>
+                  <AssistantSelect profiles={profiles} value={assistantId} onChange={setAssistantId} />
+                  {profiles.length === 0 && (
+                    <p className="mt-1.5 text-xs text-slate-500">
+                      Only the Default assistant exists yet.{" "}
+                      <a href="/assistant" target="_blank" rel="noreferrer" className="font-semibold text-violet-700 hover:underline">
+                        Create one for this purpose
+                      </a>{" "}
+                      (opens in a new tab), then pick it on the campaign page.
+                    </p>
+                  )}
+                  <label className="label mt-3">What this campaign is about</label>
+                  <textarea
+                    className="input min-h-20"
+                    value={brief}
+                    maxLength={4000}
+                    onChange={(e) => setBrief(e.target.value)}
+                    placeholder="e.g. Hiring senior backend engineers (Go, remote). Goal: a 15-minute intro call with the hiring manager."
+                  />
+                  <p className="mt-1 text-[11.5px] text-slate-400">
+                    Used when a lead asks &ldquo;why did you contact me?&rdquo; or &ldquo;what&apos;s this about?&rdquo;.
+                  </p>
+                </div>
               </div>
             )}
 
@@ -199,7 +247,8 @@ export function CampaignWizard({
                 <div className="mt-5 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
                   <p>
                     <strong>{name || "Untitled campaign"}</strong> from{" "}
-                    {accounts.find((a) => a.id === accountId)?.label || "—"} · {steps.length} steps
+                    {accounts.find((a) => a.id === accountId)?.label || "—"} · {steps.length} steps · answered by{" "}
+                    {profiles.find((p) => p.id === assistantId)?.name ?? "the Default assistant"}
                     {selectedListId && <> · enrolling {lists.find((l) => l.id === selectedListId)?.name}</>}
                   </p>
                 </div>

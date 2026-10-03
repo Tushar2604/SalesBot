@@ -9,7 +9,7 @@ connecting an account works in `routes_linkedin.py`.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -86,18 +86,44 @@ async def list_messages(
 ) -> list[Message]:
     # Confirms the conversation belongs to this workspace before returning
     # any of its messages.
-    await _get_with_account(db, workspace_id, conversation_id)
-    return list(
+    conversation, _account, _lead = await _get_with_account(db, workspace_id, conversation_id)
+    messages = list(
         (
             await db.execute(
                 select(Message)
                 .where(Message.conversation_id == conversation_id)
-                .order_by(Message.sent_at)
+                .order_by(Message.sent_at, Message.created_at)
             )
         )
         .scalars()
         .all()
     )
+    if _heal_future_times(conversation, messages, datetime.now(UTC)):
+        await db.commit()
+        messages.sort(key=lambda m: (m.sent_at, m.created_at))
+    return messages
+
+
+def _heal_future_times(
+    conversation: Conversation, messages: list[Message], now: datetime
+) -> bool:
+    """Moves messages stamped in the future back to the day they were sent.
+
+    A synced message carries only LinkedIn's clock time; when the thread's day
+    divider was misread it was dated today, so last night's 11 PM message
+    shows up after this morning's reply. It is off by whole days: step it
+    back a day at a time until it is no longer in the future.
+    """
+    ceiling = now + timedelta(minutes=5)
+    healed = False
+    for message in messages:
+        if message.sent_at > ceiling:
+            while message.sent_at > ceiling:
+                message.sent_at -= timedelta(days=1)
+            healed = True
+    if healed:
+        conversation.last_message_at = max(m.sent_at for m in messages)
+    return healed
 
 
 async def set_label(

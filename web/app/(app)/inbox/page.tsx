@@ -9,7 +9,7 @@
  * worker task, not this request, is what actually talks to LinkedIn.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError } from "@/lib/api";
 import { inboxApi, type Conversation, type ConversationLabel, type Message } from "@/lib/inbox-api";
 import { assistantApi, type AssistantMode } from "@/lib/assistant-api";
@@ -117,12 +117,39 @@ export default function InboxPage() {
 
   const selected = conversations.find((c) => c.id === selectedId) ?? null;
 
+  // `/inbox?conversation=<id>` (notifications, the campaign page) opens that
+  // thread once it has loaded — once only, so "back" does not reopen it.
+  const [requestedId] = useState<string | null>(() =>
+    typeof window === "undefined"
+      ? null
+      : new URLSearchParams(window.location.search).get("conversation"),
+  );
+  const openedRequested = useRef(false);
+  useEffect(() => {
+    if (openedRequested.current || !requestedId) return;
+    if (!conversations.some((c) => c.id === requestedId)) return;
+    openedRequested.current = true;
+    select(requestedId);
+    // select is recreated each render; this runs once per requested id.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requestedId, conversations]);
+
   const loadMessages = useCallback(
     async (id: string) => {
       if (!workspaceId) return;
       setMessagesLoading(true);
       try {
-        setMessages(await inboxApi.messages(workspaceId, id));
+        const fetched = await inboxApi.messages(workspaceId, id);
+        // A queued reply can wait out the account's action gap for a few
+        // minutes: keep its bubble until the server has the real message.
+        setMessages((prev) => [
+          ...fetched,
+          ...prev.filter(
+            (m) =>
+              m.id.startsWith(`optimistic-${id}-`) &&
+              !fetched.some((f) => f.direction === "outbound" && f.body.trim() === m.body.trim()),
+          ),
+        ]);
       } catch {
         setMessages([]);
       } finally {
@@ -154,12 +181,30 @@ export default function InboxPage() {
     }
   }
 
+  // Re-reads the thread a few times after a send, until the worker has
+  // delivered it (see the action gap note in loadMessages).
+  const selectedRef = useRef(selectedId);
+  selectedRef.current = selectedId;
+  function refreshAfterSend(id: string) {
+    for (const delay of [4_000, 20_000, 60_000, 180_000]) {
+      setTimeout(() => {
+        if (selectedRef.current === id) void loadMessages(id);
+      }, delay);
+    }
+  }
+
   async function send(text: string) {
     if (!workspaceId || !selectedId) return;
     setSending(true);
     setMessages((prev) => [
       ...prev,
-      { id: `optimistic-${Date.now()}`, direction: "outbound", body: text, sent_at: new Date().toISOString(), ai_label: null },
+      {
+        id: `optimistic-${selectedId}-${Date.now()}`,
+        direction: "outbound",
+        body: text,
+        sent_at: new Date().toISOString(),
+        ai_label: null,
+      },
     ]);
     // Replying yourself takes this thread over from the assistant.
     setConversations((prev) =>
@@ -169,7 +214,7 @@ export default function InboxPage() {
     );
     try {
       await inboxApi.reply(workspaceId, selectedId, text);
-      setTimeout(() => void loadMessages(selectedId), 4000);
+      refreshAfterSend(selectedId);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not send the reply");
     } finally {
@@ -180,20 +225,97 @@ export default function InboxPage() {
   async function sendDraft(text: string) {
     if (!workspaceId || !selectedId) return;
     setSending(true);
+    const optimisticId = `optimistic-${selectedId}-${Date.now()}`;
+    const previousDraft = selected?.bot_draft ?? "";
     setMessages((prev) => [
       ...prev,
-      { id: `optimistic-${Date.now()}`, direction: "outbound", body: text, sent_at: new Date().toISOString(), ai_label: null, author: "bot" },
+      { id: optimisticId, direction: "outbound", body: text, sent_at: new Date().toISOString(), ai_label: null, author: "bot" },
     ]);
     setConversations((prev) => prev.map((c) => (c.id === selectedId ? { ...c, bot_draft: "" } : c)));
     try {
-      await inboxApi.sendDraft(workspaceId, selectedId, text);
-      setTimeout(() => void loadMessages(selectedId), 4000);
+      const updated = await inboxApi.sendDraft(workspaceId, selectedId, text);
+      setConversations((prev) => prev.map((c) => (c.id === selectedId ? updated : c)));
+      refreshAfterSend(selectedId);
     } catch (err) {
+      // Nothing was queued: put the draft back so it can be sent again.
+      setMessages((prev) => prev.filter((m) => m.id !== optimisticId));
+      setConversations((prev) =>
+        prev.map((c) => (c.id === selectedId ? { ...c, bot_draft: previousDraft || text } : c)),
+      );
       setError(err instanceof ApiError ? err.message : "Could not send the reply");
     } finally {
       setSending(false);
     }
   }
+
+  // ── AI drafts on demand ────────────────────────────────────────────────────
+  // The worker writes the draft; we poll the conversation until `bot_draft_at`
+  // moves, which it does whatever the assistant decided.
+  const [draftingId, setDraftingId] = useState<string | null>(null);
+  const [draftNote, setDraftNote] = useState<{ id: string; text: string } | null>(null);
+  const autoRequested = useRef(new Set<string>());
+
+  const requestDraft = useCallback(
+    async (id: string, before: string | null) => {
+      if (!workspaceId) return;
+      setDraftingId(id);
+      setDraftNote(null);
+      try {
+        await inboxApi.requestDraft(workspaceId, id);
+      } catch (err) {
+        setDraftingId(null);
+        setDraftNote({ id, text: err instanceof ApiError ? err.message : "Could not ask for a draft" });
+        return;
+      }
+      const started = Date.now();
+      const poll = async () => {
+        try {
+          const c = await inboxApi.conversation(workspaceId, id);
+          if (c.bot_draft_at && c.bot_draft_at !== before) {
+            setConversations((prev) => prev.map((x) => (x.id === id ? c : x)));
+            setDraftingId(null);
+            if (!c.bot_draft) {
+              setDraftNote({
+                id,
+                text:
+                  c.bot_paused && c.bot_pause_reason.startsWith("Needs you")
+                    ? `The assistant handed this one to you. ${c.bot_pause_reason}`
+                    : "The assistant thinks nothing needs saying here right now.",
+              });
+            }
+            return;
+          }
+        } catch {
+          // keep polling; a blip is not a failure
+        }
+        if (Date.now() - started > 90_000) {
+          setDraftingId(null);
+          setDraftNote({
+            id,
+            text: "No draft came back. Check that an AI provider key is set and the worker is running, then try again.",
+          });
+          return;
+        }
+        setTimeout(() => void poll(), 2500);
+      };
+      setTimeout(() => void poll(), 2500);
+    },
+    [workspaceId],
+  );
+
+  // Every thread gets a draft: opening one the assistant has not answered
+  // since its latest message asks for one straight away.
+  useEffect(() => {
+    if (!selected || !assistantMode || assistantMode === "off") return;
+    if (selected.bot_draft || selected.bot_send_at || draftingId) return;
+    if (autoRequested.current.has(selected.id)) return;
+    const decided =
+      selected.bot_draft_at &&
+      (!selected.last_message_at || new Date(selected.bot_draft_at) >= new Date(selected.last_message_at));
+    if (decided) return;
+    autoRequested.current.add(selected.id);
+    void requestDraft(selected.id, selected.bot_draft_at);
+  }, [selected, assistantMode, draftingId, requestDraft]);
 
   const stats = useMemo(() => {
     const unread = conversations.filter((c) => c.unread).length;
@@ -327,6 +449,9 @@ export default function InboxPage() {
               onDiscardDraft={() =>
                 void updateSelected({ bot_draft: "" }, () => inboxApi.discardDraft(workspaceId, selected.id))
               }
+              onRequestDraft={() => void requestDraft(selected.id, selected.bot_draft_at)}
+              drafting={draftingId === selected.id}
+              draftNote={draftNote?.id === selected.id ? draftNote.text : null}
               onTyping={() => void inboxApi.typing(workspaceId, selected.id).catch(() => undefined)}
               sending={sending}
               archived={archivedIds.includes(selected.id)}

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from httpx import AsyncClient
 
 from tests.test_inbox_api import auth, make_conversation, register, sent_tasks  # noqa: F401
@@ -55,7 +56,60 @@ async def test_knowledge_base_crud(client: AsyncClient, db: Any) -> None:
     assert (await client.get(base, headers=auth(token))).json() == []
 
 
-async def test_try_it_reports_unavailable_without_a_key(client: AsyncClient, db: Any) -> None:
+async def test_sops_can_be_attached_to_linkedin_accounts(client: AsyncClient, db: Any) -> None:
+    import uuid
+
+    from app.models.inbox import Conversation
+
+    token, ws = await register(client)
+    conversation_id = await make_conversation(db, ws)
+    account_id = str((await db.get(Conversation, uuid.UUID(conversation_id))).linkedin_account_id)
+    base = f"/api/v1/workspaces/{ws}/assistant/knowledge"
+
+    created = await client.post(
+        base,
+        json={"title": "Pricing SOP", "content": "Starter is $49/mo.", "linkedin_account_ids": [account_id]},
+        headers=auth(token),
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["linkedin_account_ids"] == [account_id]
+
+    # Detached again: applies to every account.
+    patched = await client.patch(
+        f"{base}/{created.json()['id']}", json={"linkedin_account_ids": []}, headers=auth(token)
+    )
+    assert patched.json()["linkedin_account_ids"] == []
+
+    # Another workspace's (or a made-up) account is refused.
+    foreign = await client.post(
+        base,
+        json={"title": "x", "content": "y", "linkedin_account_ids": [str(uuid.uuid4())]},
+        headers=auth(token),
+    )
+    assert foreign.status_code == 422
+
+
+async def test_a_draft_can_be_requested_for_any_thread(
+    client: AsyncClient, db: Any, sent_tasks: list[dict[str, Any]]  # noqa: F811
+) -> None:
+    token, ws = await register(client)
+    conversation_id = await make_conversation(db, ws)
+    response = await client.post(
+        f"/api/v1/workspaces/{ws}/conversations/{conversation_id}/bot/draft", headers=auth(token)
+    )
+    assert response.status_code == 202, response.text
+    assert [t["name"] for t in sent_tasks] == ["assistant.respond"]
+    assert sent_tasks[0]["args"] == [conversation_id]
+
+
+async def test_try_it_reports_unavailable_without_a_key(
+    client: AsyncClient, db: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Independent of whatever keys the machine running the tests has in .env.
+    from app.ai import assistant as ai
+
+    monkeypatch.setattr(ai, "_clients", {})
+    monkeypatch.setattr(ai, "_make_client", lambda name: None)
     token, ws = await register(client)
     response = await client.post(
         f"/api/v1/workspaces/{ws}/assistant/try",

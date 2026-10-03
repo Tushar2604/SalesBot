@@ -9,7 +9,7 @@ import { apiFetch, downloadFile, uploadForm } from "@/lib/api";
 
 // ── leads ────────────────────────────────────────────────────────────────────
 
-export type LeadSource = "csv" | "linkedin_search" | "sales_navigator" | "manual" | "api";
+export type LeadSource = "csv" | "linkedin_search" | "sales_navigator" | "manual" | "api" | "ai_search";
 
 export type Lead = {
   id: string;
@@ -231,7 +231,14 @@ export type Campaign = {
   created_at: string;
   /** Plain-language reasons the campaign cannot launch yet. */
   launch_blockers: string[];
+  /** What the campaign is about, for the AI assistant when a lead replies. */
+  ai_brief: string;
+  /** The named assistant answering this campaign's leads; null = the default one. */
+  assistant_id: string | null;
+  assistant_name: string;
 };
+
+export type BotStatus = "" | "draft_ready" | "reply_scheduled" | "bot_replied" | "needs_you" | "paused";
 
 export type Enrollment = {
   id: string;
@@ -248,6 +255,15 @@ export type Enrollment = {
   replied_at: string | null;
   last_error: string;
   stopped_reason: string;
+  viewed_at: string | null;
+  connection_state: string;
+  next_action: StepType | null;
+  next_action_at: string | null;
+  conversation_id: string | null;
+  last_reply_text: string;
+  last_reply_at: string | null;
+  bot_status: BotStatus;
+  bot_send_at: string | null;
 };
 
 export type ActionTaskRecord = {
@@ -261,6 +277,7 @@ export type ActionTaskRecord = {
   error_class: string;
   error_detail: string;
   lead_public_id: string;
+  lead_name: string;
 };
 
 export type QuotaStatus = {
@@ -311,14 +328,25 @@ export const campaignsApi = {
       linkedin_account_id: string;
       steps: StepInput[];
       stop_on_reply: boolean;
+      assistant_id?: string | null;
+      ai_brief?: string;
     },
-  ) => apiFetch<Campaign>(`/workspaces/${ws}/campaigns`, { method: "POST", body }),
+    acknowledgeRisk = false,
+  ) =>
+    apiFetch<Campaign>(`/workspaces/${ws}/campaigns?acknowledge_risk=${acknowledgeRisk}`, {
+      method: "POST",
+      body,
+    }),
 
-  update: (ws: string, id: string, patch: { name?: string; stop_on_reply?: boolean }) =>
+  update: (
+    ws: string,
+    id: string,
+    patch: { name?: string; stop_on_reply?: boolean; ai_brief?: string; assistant_id?: string | null },
+  ) =>
     apiFetch<Campaign>(`/workspaces/${ws}/campaigns/${id}`, { method: "PATCH", body: patch }),
 
-  replaceSteps: (ws: string, id: string, steps: StepInput[]) =>
-    apiFetch<Campaign>(`/workspaces/${ws}/campaigns/${id}/steps`, {
+  replaceSteps: (ws: string, id: string, steps: StepInput[], acknowledgeRisk = false) =>
+    apiFetch<Campaign>(`/workspaces/${ws}/campaigns/${id}/steps?acknowledge_risk=${acknowledgeRisk}`, {
       method: "PUT",
       body: steps,
     }),
@@ -500,7 +528,11 @@ export function describeMinutes(minutes: number): string {
 
 /** One line saying when this step will run, for the builder and summaries. */
 export function describeTiming(step: StepInput, isFirst: boolean): string {
-  const base = isFirst ? "after the campaign starts" : "after the previous step";
+  const base = isFirst
+    ? "after the campaign starts"
+    : step.only_if === "if_accepted"
+      ? "after they accept"
+      : "after the previous step";
   switch (step.timing ?? "smart") {
     case "asap":
       return "as soon as the account's limits allow";

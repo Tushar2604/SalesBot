@@ -59,6 +59,10 @@ class StepType(enum.StrEnum):
     MESSAGE = "message"
     WITHDRAW_INVITE = "withdraw_invite"
     WAIT = "wait"
+    # Not a campaign step: liking a post from the account's own feed, triggered
+    # by the person browsing it in our UI. Uses the same ActionTask machinery
+    # (pacing, quota, circuit breaker) with no campaign_lead_id attached.
+    LIKE_POST = "like_post"
 
 
 class StepCondition(enum.StrEnum):
@@ -382,6 +386,17 @@ class ActionTask(UUIDPrimaryKey, Base):
         attempt_bucket: int = 0,
     ) -> str:
         raw = f"{campaign_lead_id}:{step_id}:{attempt_bucket}"
+        return hashlib.sha256(raw.encode()).hexdigest()
+
+    @staticmethod
+    def build_like_idempotency_key(account_id: uuid.UUID, post_urn: str, day: date) -> str:
+        """One like per post per account per local day.
+
+        Shared by the manual "Like" button and the autonomous sweep so a post
+        a person already liked (or already queued) is never queued twice,
+        whichever path got there first.
+        """
+        raw = f"like_post:{account_id}:{post_urn}:{day.isoformat()}"
         return hashlib.sha256(raw.encode()).hexdigest()
 
 

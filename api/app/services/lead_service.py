@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import NotFoundError, ValidationFailedError
 from app.deps import WorkspaceContext
+from app.integrations import events as integration_events
 from app.models.leads import (
     BlocklistEntry,
     BlocklistKind,
@@ -280,7 +281,29 @@ async def add_leads_from_urls(
         target_id=lead_list.id,
         metadata={"imported": report.imported, "updated": report.updated, "skipped": report.skipped},
     )
+    await emit_imported(db, ctx, report, "pasted_links")
     return report
+
+
+async def emit_imported(
+    db: AsyncSession, ctx: WorkspaceContext, report: ImportReport, source: str
+) -> None:
+    """The `lead.imported` webhook event, shared by every way leads come in."""
+    if not (report.imported or report.updated):
+        return
+    await integration_events.emit(
+        db,
+        ctx.workspace_id,
+        "lead.imported",
+        {
+            "list_id": str(report.list_id),
+            "list_name": report.list_name,
+            "source": source,
+            "imported": report.imported,
+            "updated": report.updated,
+            "skipped": report.skipped,
+        },
+    )
 
 
 async def import_csv(
@@ -329,6 +352,8 @@ async def import_csv(
     report = ImportReport(list_id=lead_list.id, list_name=lead_list.name)
     blocklist = await load_blocklist(db, ctx.workspace_id)
 
+    # The workspace's testing switch lifts the "already contacted" filter too.
+    skip_already_contacted = skip_already_contacted and not ctx.workspace.allow_recontact
     contacted: set[str] = set()
     if skip_already_contacted:
         contacted = {
@@ -457,6 +482,7 @@ async def import_csv(
             "skipped": report.skipped,
         },
     )
+    await emit_imported(db, ctx, report, "csv")
     return report
 
 

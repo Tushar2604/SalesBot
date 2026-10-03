@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
@@ -29,6 +29,8 @@ class ProxyCreateRequest(BaseModel):
     country: str = Field(default="", max_length=2)
     city: str = Field(default="", max_length=80)
     sticky_session_id: str = Field(default="", max_length=120)
+    # Set only after the person accepted the returned location risks.
+    acknowledge_risk: bool = False
 
     @field_validator("country")
     @classmethod
@@ -48,6 +50,8 @@ class ProxyResponse(BaseModel):
     city: str
     status: ProxyStatus
     last_exit_ip: str
+    # Measured exit country; can differ from the `country` the provider claimed.
+    exit_country: str = ""
     last_checked_at: datetime | None
     assigned_account_id: uuid.UUID | None
     created_at: datetime
@@ -126,19 +130,25 @@ class CapsUpdateRequest(BaseModel):
     daily_invites: int | None = Field(default=None, ge=1, le=100)
     daily_messages: int | None = Field(default=None, ge=1, le=100)
     daily_views: int | None = Field(default=None, ge=1, le=200)
+    daily_likes: int | None = Field(default=None, ge=1, le=60)
     weekly_invites: int | None = Field(default=None, ge=1, le=200)
     working_hours: WorkingHours | None = None
     weekdays_only: bool | None = None
     test_mode: bool | None = None
+    auto_like_enabled: bool | None = None
     timezone: str | None = Field(default=None, max_length=64)
     label: str | None = Field(default=None, max_length=120)
     proxy_id: uuid.UUID | None = None
+    # Set only after the person has seen and accepted the risks the server
+    # returned in a `risk_confirmation_required` error.
+    acknowledge_risk: bool = False
 
 
 class EffectiveCapsResponse(BaseModel):
     daily_invites: int
     daily_messages: int
     daily_views: int
+    daily_likes: int
     weekly_invites: int
     working_hours: WorkingHours
     weekdays_only: bool
@@ -191,6 +201,7 @@ class LinkedInAccountResponse(BaseModel):
     caps: EffectiveCapsResponse
     within_working_hours: bool
     working_hours_detail: str
+    auto_like_enabled: bool
 
     # Descriptions, not the underlying secrets.
     device: str
@@ -198,6 +209,10 @@ class LinkedInAccountResponse(BaseModel):
     proxy_country: str
     using_direct_connection: bool
     warnings: list[str]
+    # Safety warnings in the last 30 days, toward an automatic pause at `warning_limit`.
+    warning_count: int = 0
+    warning_limit: int = 3
+    risk_level: str = "safe"
 
     publishing: PublishingStatus
 
@@ -228,3 +243,75 @@ class SessionCheckResponse(BaseModel):
     classification: str
     detail: str
     profile: dict[str, Any] | None = None
+
+
+# ── feed ─────────────────────────────────────────────────────────────────────
+
+
+class FeedPostResponse(BaseModel):
+    urn: str
+    author_name: str
+    author_headline: str
+    author_avatar_url: str
+    text: str
+    liked: bool
+    like_count: int
+    comment_count: int = 0
+    image_urls: list[str] = Field(default_factory=list)
+    # Set once a like on this post is queued, so the UI can show "queued"
+    # without polling a second endpoint per post.
+    like_pending: bool = False
+
+
+class FeedResponse(BaseModel):
+    posts: list[FeedPostResponse]
+    fetched_at: datetime | None
+    # True while a refresh is queued but the cache above is still the old one.
+    refreshing: bool = False
+
+
+class LikePostRequest(BaseModel):
+    post_urn: str = Field(min_length=1, max_length=200)
+
+
+class LikeTaskResponse(BaseModel):
+    task_id: uuid.UUID
+    status: str
+    post_urn: str
+
+
+# ── auto-like topic rules ────────────────────────────────────────────────────
+
+
+class AutoLikeRules(BaseModel):
+    """Which posts auto-like may pick. `exclude` always wins."""
+
+    mode: Literal["any", "topics"] = "any"
+    topics: list[str] = Field(default_factory=list, max_length=20)
+    exclude: list[str] = Field(default_factory=list, max_length=20)
+    # Match by meaning with the AI provider; keywords when it's off or unavailable.
+    use_ai: bool = True
+
+
+class AutoLikeRulesResponse(AutoLikeRules):
+    auto_like_enabled: bool
+    ai_available: bool
+    suggested_topics: list[str]
+    suggested_excludes: list[str]
+
+
+class AutoLikePreviewPost(BaseModel):
+    urn: str
+    author_name: str
+    text: str
+    liked: bool
+    would_like: bool
+    topic: str = ""
+    reason: str = ""
+    matched_by: str = "keywords"
+
+
+class AutoLikePreview(BaseModel):
+    rules: AutoLikeRules
+    posts: list[AutoLikePreviewPost]
+    matching: int

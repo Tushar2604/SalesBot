@@ -14,7 +14,7 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from app.core.logging import get_logger
-from app.linkedin.remote_browser.protocol import KeyInput, MouseInput
+from app.linkedin.remote_browser.protocol import KeyInput, MouseInput, TextInput
 
 if TYPE_CHECKING:
     from playwright.async_api import CDPSession, Page
@@ -83,33 +83,47 @@ class CdpRelay:
                 except Exception as exc:
                     log.debug("remote_browser.frame_ack_failed", error=str(exc))
 
-    async def dispatch_input(self, message: MouseInput | KeyInput) -> None:
+    async def dispatch_input(self, message: MouseInput | KeyInput | TextInput) -> None:
         try:
-            if isinstance(message, MouseInput):
+            if isinstance(message, TextInput):
+                await self._cdp.send("Input.insertText", {"text": message.text})
+            elif isinstance(message, MouseInput):
                 await self._cdp.send(
                     "Input.dispatchMouseEvent",
                     {
                         "type": _MOUSE_EVENT_TYPE[message.event],
                         "x": message.x,
                         "y": message.y,
-                        "button": message.button,
-                        "clickCount": 1 if message.event == "mousedown" else 0,
+                        # Blink only fires `click` when the release also has
+                        # clickCount >= 1; a moved pointer carries no button.
+                        "button": (
+                            message.button
+                            if message.event in ("mousedown", "mouseup")
+                            else "none"
+                        ),
+                        "clickCount": 1 if message.event in ("mousedown", "mouseup") else 0,
                         "deltaX": 0,
                         "deltaY": message.delta_y,
                     },
                 )
             else:
+                # keyDown carrying `text` already inserts the character; a
+                # following insertText would type it twice. Keys without text
+                # (Backspace, Tab, arrows) must be rawKeyDown to act as edits.
+                event_type = _KEY_EVENT_TYPE[message.event]
+                if event_type == "keyDown" and not message.text:
+                    event_type = "rawKeyDown"
                 payload: dict[str, object] = {
-                    "type": _KEY_EVENT_TYPE[message.event],
+                    "type": event_type,
                     "key": message.key,
                     "code": message.code,
                     "windowsVirtualKeyCode": message.windows_virtual_key_code,
-                    "text": message.text,
+                    "nativeVirtualKeyCode": message.windows_virtual_key_code,
+                    "modifiers": message.modifiers,
                 }
+                if message.text:
+                    payload["text"] = message.text
+                    payload["unmodifiedText"] = message.text
                 await self._cdp.send("Input.dispatchKeyEvent", payload)
-                # React-controlled LinkedIn inputs often ignore keyDown/keyUp
-                # unless a following insertText actually commits the character.
-                if message.event == "keydown" and message.text:
-                    await self._cdp.send("Input.insertText", {"text": message.text})
         except Exception as exc:
-            log.debug("remote_browser.input_dispatch_failed", error=str(exc))
+            log.warning("remote_browser.input_dispatch_failed", error=str(exc))

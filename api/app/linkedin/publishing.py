@@ -24,7 +24,7 @@ import enum
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any, Final
+from typing import Any, Final, cast
 from urllib.parse import urlencode
 
 import httpx
@@ -697,4 +697,14 @@ def build_publisher(account: LinkedInAccount) -> LinkedInPublisher:
             code=CapabilityCode.REVOKED.value,
             auth_lost=True,
         )
-    return LinkedInPublisher(access_token=token, member_urn=account.publishing_member_urn)
+    # Wrapped so a post waits out the account's action gap like every other
+    # write (app/linkedin/guard.py).
+    from app.linkedin.guard import GuardedPublisher
+
+    return cast(
+        LinkedInPublisher,
+        GuardedPublisher(
+            LinkedInPublisher(access_token=token, member_urn=account.publishing_member_urn),
+            account,
+        ),
+    )

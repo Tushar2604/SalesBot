@@ -61,6 +61,7 @@ def _to_response(
         bot_pause_reason=conversation.bot_pause_reason,
         bot_draft=conversation.bot_draft,
         bot_draft_at=conversation.bot_draft_at,
+        bot_send_at=conversation.bot_send_at,
         bot_extracted={str(k): str(v) for k, v in (conversation.bot_extracted or {}).items()},
     )
 
@@ -232,6 +233,11 @@ async def send_draft(
     reply, this keeps the assistant active in the thread."""
     ctx.require_role(WorkspaceRole.MEMBER)
     conversation = await inbox_service.prepare_reply(db, ctx, conversation_id, payload.text)
+    # The draft is on its way: take it off the thread now, or the next inbox
+    # refresh shows it again (the send can wait out the action gap for a few
+    # minutes) and, in auto mode, the assistant would send it a second time.
+    conversation.bot_draft = ""
+    conversation.bot_send_at = None
     await db.commit()
     celery_app.send_task(
         "linkedin.action.send_reply",
@@ -241,6 +247,30 @@ async def send_draft(
     account = await db.get(LinkedInAccount, conversation.linkedin_account_id)
     lead = await db.get(Lead, conversation.lead_id) if conversation.lead_id else None
     return _to_response(conversation, account, lead)  # type: ignore[arg-type]
+
+
+@router.post(
+    "/conversations/{conversation_id}/bot/draft",
+    response_model=ConversationResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def request_draft(
+    conversation_id: uuid.UUID, ctx: Workspace_, db: Annotated[AsyncSession, Depends(get_db)]
+) -> ConversationResponse:
+    """Ask the assistant for a suggested reply in this thread now, using the
+    SOPs attached to its account. Only ever a draft: nothing is sent. The
+    result lands on the conversation (`bot_draft_at` moves) a few seconds later."""
+    ctx.require_role(WorkspaceRole.MEMBER)
+    conversation, account, lead = await inbox_service.get_conversation(
+        db, ctx.workspace_id, conversation_id
+    )
+    celery_app.send_task(
+        "assistant.respond",
+        args=[str(conversation.id)],
+        kwargs={"force": True},
+        queue="ai",
+    )
+    return _to_response(conversation, account, lead)
 
 
 @router.post(
@@ -255,5 +285,6 @@ async def discard_draft(
     )
     conversation.bot_draft = ""
     conversation.bot_draft_at = None
+    conversation.bot_send_at = None
     await db.commit()
     return _to_response(conversation, account, lead)

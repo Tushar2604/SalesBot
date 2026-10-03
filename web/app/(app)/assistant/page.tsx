@@ -4,8 +4,8 @@
  * AI Assistant — how the inbox bot behaves.
  *
  *  Mode         off / draft (suggests, you send) / auto (sends by itself)
- *  Who it is    the person or team it speaks for, tone, topics to hand off
- *  Knowledge    what it may share: job descriptions, FAQs, product facts
+ *  Assistants   one per kind of conversation (HR, sales, team); campaigns pick one
+ *  SOPs         what they answer from, attached per assistant and per account
  *  Limits       reply pace and daily caps
  *  Try it       a pretend conversation to see its decision; sends nothing
  *
@@ -15,15 +15,18 @@
 import { useCallback, useEffect, useState } from "react";
 import { ApiError } from "@/lib/api";
 import { useSession } from "@/lib/session";
+import { useRiskGuard } from "@/components/RiskGuard";
 import {
   assistantApi,
   type AssistantMode,
+  type AssistantProfile,
   type AssistantSettings,
-  type KnowledgeItem,
   type TryResult,
   type TryTurn,
 } from "@/lib/assistant-api";
-import { IconSparkle, IconTrash } from "@/components/app/icons";
+import { IconSparkle } from "@/components/app/icons";
+import { SopManager, accountName, useLinkedInAccounts } from "@/components/assistant/SopManager";
+import { AssistantSelect, AssistantsSection, useAssistantProfiles } from "@/components/assistant/Assistants";
 
 const MODES: { key: AssistantMode; title: string; body: string }[] = [
   { key: "off", title: "Off", body: "The assistant does nothing. You handle every message." },
@@ -50,63 +53,16 @@ function Section({ title, hint, children }: { title: string; hint?: string; chil
   );
 }
 
-function KnowledgeRow({
-  item,
-  onSave,
-  onDelete,
-}: {
-  item: KnowledgeItem;
-  onSave: (patch: Partial<KnowledgeItem>) => Promise<void>;
-  onDelete: () => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [title, setTitle] = useState(item.title);
-  const [content, setContent] = useState(item.content);
-  const dirty = title !== item.title || content !== item.content;
-
-  return (
-    <li className="rounded-lg border border-slate-200">
-      <div className="flex items-center gap-3 px-3 py-2.5">
-        <button onClick={() => setOpen((v) => !v)} className="min-w-0 flex-1 text-left">
-          <p className={`truncate text-[13.5px] font-semibold ${item.enabled ? "text-ink-950" : "text-slate-400 line-through"}`}>
-            {item.title}
-          </p>
-          <p className="truncate text-[12px] text-slate-400">{item.content.slice(0, 120)}</p>
-        </button>
-        <label className="flex items-center gap-1.5 text-[12px] text-slate-500">
-          <input type="checkbox" checked={item.enabled} onChange={(e) => void onSave({ enabled: e.target.checked })} />
-          Use
-        </label>
-        <button aria-label="Delete" className="text-slate-400 hover:text-state-bad" onClick={onDelete}>
-          <IconTrash className="h-4 w-4" />
-        </button>
-      </div>
-      {open && (
-        <div className="space-y-2 border-t border-slate-100 p-3">
-          <input className="input" value={title} onChange={(e) => setTitle(e.target.value)} />
-          <textarea className="input h-40" value={content} onChange={(e) => setContent(e.target.value)} />
-          <div className="flex justify-end">
-            <button
-              className="btn-primary px-3 py-1.5 text-xs"
-              disabled={!dirty || !title.trim() || !content.trim()}
-              onClick={() => void onSave({ title: title.trim(), content: content.trim() })}
-            >
-              Save changes
-            </button>
-          </div>
-        </div>
-      )}
-    </li>
-  );
-}
-
-function TryIt({ workspaceId }: { workspaceId: string }) {
+function TryIt({ workspaceId, profiles }: { workspaceId: string; profiles: AssistantProfile[] }) {
   const [turns, setTurns] = useState<TryTurn[]>([
     { from_me: true, text: "Hi! We're hiring a Backend Engineer at our company — would you be open to hearing more?" },
   ]);
   const [message, setMessage] = useState("Yes, can you share the job description? My email is ravi@example.com");
   const [result, setResult] = useState<TryResult | null>(null);
   const [busy, setBusy] = useState(false);
+  const accounts = useLinkedInAccounts(workspaceId);
+  const [accountId, setAccountId] = useState("");
+  const [assistantId, setAssistantId] = useState<string | null>(null);
 
   async function run() {
     if (!message.trim()) return;
@@ -114,7 +70,7 @@ function TryIt({ workspaceId }: { workspaceId: string }) {
     setBusy(true);
     setResult(null);
     try {
-      const r = await assistantApi.tryIt(workspaceId, convo);
+      const r = await assistantApi.tryIt(workspaceId, convo, accountId, assistantId);
       setTurns(r.action === "reply" ? [...convo, { from_me: true, text: r.reply }] : convo);
       setResult(r);
       setMessage("");
@@ -127,6 +83,29 @@ function TryIt({ workspaceId }: { workspaceId: string }) {
 
   return (
     <div>
+      <div className="mb-3 flex flex-wrap items-center gap-2 text-[13px] text-slate-600">
+        {profiles.length > 0 && (
+          <>
+            <span>Assistant</span>
+            <div className="w-auto">
+              <AssistantSelect profiles={profiles} value={assistantId} onChange={setAssistantId} />
+            </div>
+          </>
+        )}
+      {accounts.length > 0 && (
+        <>
+          <span>from</span>
+          <select className="input w-auto" value={accountId} onChange={(e) => setAccountId(e.target.value)}>
+            <option value="">Any account (shared SOPs only)</option>
+            {accounts.map((a) => (
+              <option key={a.id} value={a.id}>
+                {accountName(a)}
+              </option>
+            ))}
+          </select>
+        </>
+      )}
+      </div>
       <div className="mb-3 max-h-80 space-y-2 overflow-y-auto rounded-lg bg-slate-50 p-3">
         {turns.map((t, i) => (
           <div key={i} className={`flex ${t.from_me ? "justify-end" : "justify-start"}`}>
@@ -184,22 +163,20 @@ function TryIt({ workspaceId }: { workspaceId: string }) {
 export default function AssistantPage() {
   const { workspace } = useSession();
   const workspaceId = workspace?.id ?? null;
+  const { guarded } = useRiskGuard();
 
   const [settings, setSettings] = useState<AssistantSettings | null>(null);
   const [form, setForm] = useState<AssistantSettings | null>(null);
-  const [items, setItems] = useState<KnowledgeItem[]>([]);
-  const [newTitle, setNewTitle] = useState("");
-  const [newContent, setNewContent] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const { profiles, setProfiles } = useAssistantProfiles(workspaceId);
 
   const load = useCallback(async () => {
     if (!workspaceId) return;
     try {
-      const [s, k] = await Promise.all([assistantApi.settings(workspaceId), assistantApi.knowledge(workspaceId)]);
+      const s = await assistantApi.settings(workspaceId);
       setSettings(s);
       setForm(s);
-      setItems(k);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not load the assistant settings");
     }
@@ -209,30 +186,27 @@ export default function AssistantPage() {
     void load();
   }, [load]);
 
-  async function save(patch: Partial<AssistantSettings>) {
-    if (!workspaceId) return;
+  // `base` is what the patch is laid over: the form (with any unsaved pace
+  // edits) for this page's own Save buttons, the stored settings when the
+  // Default assistant editor saves only its own fields.
+  async function save(patch: Partial<AssistantSettings>, base = form): Promise<boolean> {
+    if (!workspaceId || !base) return false;
     try {
-      const { ai_available: _ignored, ...rest } = { ...form!, ...patch };
-      const next = await assistantApi.saveSettings(workspaceId, rest);
+      const { ai_available: _ignored, ...rest } = { ...base, ...patch };
+      const next = await guarded((ack) => assistantApi.saveSettings(workspaceId, rest, ack));
+      if (!next) {
+        setForm(settings); // kept safe: put the risky values back
+        return false;
+      }
       setSettings(next);
-      setForm(next);
+      setForm((prev) => (prev && base !== prev ? { ...prev, ...patch } : next));
       setError(null);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
+      return true;
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not save");
-    }
-  }
-
-  async function addItem() {
-    if (!workspaceId || !newTitle.trim() || !newContent.trim()) return;
-    try {
-      const item = await assistantApi.createKnowledge(workspaceId, { title: newTitle.trim(), content: newContent.trim() });
-      setItems((prev) => [item, ...prev]);
-      setNewTitle("");
-      setNewContent("");
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not add it");
+      return false;
     }
   }
 
@@ -266,7 +240,10 @@ export default function AssistantPage() {
       )}
       {error && <p className="rounded-md border border-state-bad/40 bg-state-bad/10 px-4 py-3 text-sm text-state-bad">{error}</p>}
 
-      <Section title="Mode" hint="Whatever the mode, the assistant steps back in a conversation the moment you type or reply there.">
+      <Section
+        title="Mode"
+        hint="The master switch for every assistant below. Each assistant can be set quieter (draft only, or off), never louder. Whatever the mode, the assistant steps back in a conversation the moment you type or reply there."
+      >
         <div className="grid gap-3 sm:grid-cols-3">
           {MODES.map((m) => {
             const active = settings.mode === m.key;
@@ -286,85 +263,30 @@ export default function AssistantPage() {
         </div>
       </Section>
 
-      <Section title="Who it speaks as" hint="Replies go out under your name, so tell it who you are and how you write.">
-        <label className="label">About you</label>
-        <textarea
-          className="input mb-4 h-24"
-          value={form.persona}
-          onChange={(e) => field("persona", e.target.value)}
-          placeholder="e.g. I'm Priya, the talent acquisition lead at Acme. We're hiring engineers in Bengaluru and remote."
+      <Section
+        title="Assistants"
+        hint="One assistant per kind of conversation, e.g. an HR recruiter, a sales follow-up, your internal team. Each has its own voice, questions and SOPs, and each campaign picks the one that answers its leads."
+      >
+        <AssistantsSection
+          workspaceId={workspaceId}
+          settings={settings}
+          onSaveDefault={(patch) => save(patch, settings)}
+          profiles={profiles}
+          setProfiles={setProfiles}
         />
-        <label className="label">How to reply</label>
-        <textarea
-          className="input mb-4 h-24"
-          value={form.instructions}
-          onChange={(e) => field("instructions", e.target.value)}
-          placeholder="e.g. Friendly and brief. If someone is interested, ask for their CV and notice period. Sign off with 'Priya'."
-        />
-        <label className="label">Always hand these to me</label>
-        <input
-          className="input"
-          value={form.handoff_topics}
-          onChange={(e) => field("handoff_topics", e.target.value)}
-          placeholder="e.g. salary negotiation, offer letters, visa questions, complaints"
-        />
-        <div className="mt-4 flex justify-end">
-          <button className="btn-primary" disabled={!dirty} onClick={() => void save({})}>
-            Save
-          </button>
-        </div>
       </Section>
 
       <Section
-        title="Knowledge"
-        hint="The only things it may share. Add each job description, FAQ answer or product detail as its own item. Anything not covered here gets handed to you."
+        title="SOPs"
+        hint="What the assistants answer from and how they handle a conversation. Attach each SOP to the assistants that should use it (e.g. the job descriptions to the HR recruiter) and to the LinkedIn accounts it's for. Left on 'All assistants', every assistant reads it. Anything not covered gets handed to you."
       >
-        <div className="mb-4 space-y-2 rounded-lg border border-dashed border-slate-300 p-3">
-          <input
-            className="input"
-            value={newTitle}
-            onChange={(e) => setNewTitle(e.target.value)}
-            placeholder="Title, e.g. Job description — Backend Engineer"
-          />
-          <textarea
-            className="input h-32"
-            value={newContent}
-            onChange={(e) => setNewContent(e.target.value)}
-            placeholder="Paste the content: responsibilities, requirements, location, how to apply…"
-          />
-          <div className="flex justify-end">
-            <button className="btn-primary px-3 py-1.5 text-xs" disabled={!newTitle.trim() || !newContent.trim()} onClick={() => void addItem()}>
-              Add to knowledge
-            </button>
-          </div>
-        </div>
-        {items.length === 0 ? (
-          <p className="text-[13px] text-slate-400">Nothing yet. With an empty knowledge base it hands every question to you.</p>
-        ) : (
-          <ul className="space-y-2">
-            {items.map((item) => (
-              <KnowledgeRow
-                key={item.id}
-                item={item}
-                onSave={async (patch) => {
-                  const updated = await assistantApi.updateKnowledge(workspaceId, item.id, patch);
-                  setItems((prev) => prev.map((i) => (i.id === item.id ? updated : i)));
-                }}
-                onDelete={() =>
-                  void assistantApi
-                    .deleteKnowledge(workspaceId, item.id)
-                    .then(() => setItems((prev) => prev.filter((i) => i.id !== item.id)))
-                }
-              />
-            ))}
-          </ul>
-        )}
+        <SopManager workspaceId={workspaceId} profiles={profiles} />
       </Section>
 
       <Section title="Pace and limits" hint="Keeps replies looking human and stops a runaway conversation.">
         <div className="grid gap-4 sm:grid-cols-2">
           <div>
-            <label className="label">Wait before replying (minutes)</label>
+            <label className="label">Reply after a random wait (minutes)</label>
             <div className="flex items-center gap-2">
               <input type="number" min={1} className="input w-24" value={form.reply_delay_min_minutes}
                 onChange={(e) => field("reply_delay_min_minutes", Number(e.target.value))} />
@@ -372,6 +294,10 @@ export default function AssistantPage() {
               <input type="number" min={1} className="input w-24" value={form.reply_delay_max_minutes}
                 onChange={(e) => field("reply_delay_max_minutes", Number(e.target.value))} />
             </div>
+            <p className="mt-1.5 text-xs text-slate-500">
+              Each reply picks a different time in this range (e.g. 2, then 5, then 7 minutes),
+              counted from when they wrote. Replies only go out by themselves in Auto mode.
+            </p>
           </div>
           <div>
             <label className="label">Only during working hours</label>
@@ -399,8 +325,8 @@ export default function AssistantPage() {
         </div>
       </Section>
 
-      <Section title="Try it" hint="Play the prospect and see what the assistant would do with your current settings and knowledge.">
-        <TryIt workspaceId={workspaceId} />
+      <Section title="Try it" hint="Play the prospect and see what an assistant would do with its current settings and SOPs.">
+        <TryIt workspaceId={workspaceId} profiles={profiles} />
       </Section>
     </div>
   );

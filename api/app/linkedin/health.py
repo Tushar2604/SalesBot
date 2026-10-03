@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from app.core.logging import get_logger
+from app.linkedin import risk
 from app.linkedin.classify import Classification, ResponseClass
 from app.models.linkedin import LinkedInAccount, LinkedInAccountStatus
 
@@ -96,6 +97,7 @@ def apply_classification(
         # challenge. A timed reopen would be an auto-retry into a block.
         account.circuit_open_until = now + timedelta(days=365)
         account.circuit_reason = f"{response_class.value}: {classification.detail}"[:200]
+        risk.record_linkedin_signal(account, response_class, classification.detail)
 
         log.error(
             "linkedin.circuit_opened",
@@ -124,6 +126,8 @@ def apply_classification(
 
     account.next_allowed_at = now + backoff
     account.status_detail = classification.detail
+    # After status_detail, so an automatic pause keeps its own explanation.
+    risk.record_linkedin_signal(account, response_class, classification.detail)
 
     # Repeated unexplained failures are treated as a risk signal even when each
     # one looks benign: something is wrong that we cannot name.
@@ -137,6 +141,7 @@ def apply_classification(
             account_id=str(account.id),
             consecutive_errors=account.consecutive_errors,
         )
+        risk.record_error_streak(account, account.circuit_reason)
         return HealthOutcome(
             circuit_opened=True,
             quota_should_halve=True,

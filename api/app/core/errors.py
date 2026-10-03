@@ -58,11 +58,26 @@ class QuotaExceededError(AppError):
     code = "quota_exceeded"
 
 
+class RateLimitedError(AppError):
+    """Too many requests from one API key; retry after the current minute."""
+
+    status_code = status.HTTP_429_TOO_MANY_REQUESTS
+    code = "rate_limited"
+
+
 class SafetyBlockedError(AppError):
     """The safety engine refused an action (circuit open, outside hours, cap reached)."""
 
     status_code = status.HTTP_409_CONFLICT
     code = "safety_blocked"
+
+
+class RiskConfirmationRequired(AppError):
+    """A change is outside the safe policy. The client must show the risks and
+    resend with `acknowledge_risk: true`; `details["risks"]` lists them."""
+
+    status_code = status.HTTP_409_CONFLICT
+    code = "risk_confirmation_required"
 
 
 class UpstreamError(AppError):

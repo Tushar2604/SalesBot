@@ -13,6 +13,8 @@ import { ToggleRow } from "@/components/ui/Toggle";
 import { useState } from "react";
 import clsx from "clsx";
 import { ApiError, linkedinApi, type LinkedInAccount, type ProxyRecord } from "@/lib/api";
+import { useRiskGuard } from "@/components/RiskGuard";
+import { WarningBadge } from "@/components/WarningBadge";
 import { publishingApi } from "@/lib/content-api";
 import { HealthBar, StatusPill } from "@/components/StatusPill";
 
@@ -54,6 +56,8 @@ export function AccountCard({
     (p) => !p.assigned_account_id || p.assigned_account_id === account.id,
   );
 
+  const { guarded } = useRiskGuard();
+
   async function run(action: () => Promise<unknown>) {
     setError(null);
     setBusy(true);
@@ -79,6 +83,11 @@ export function AccountCard({
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="truncate font-medium text-ink-950">{account.label || "LinkedIn account"}</h3>
             <StatusPill status={account.status} />
+            <WarningBadge
+              count={account.warning_count ?? 0}
+              limit={account.warning_limit ?? 3}
+              level={account.risk_level ?? "safe"}
+            />
             {account.test_mode && <span className="badge">test mode</span>}
           </div>
           <p className="mt-1 truncate text-sm text-slate-500">
@@ -333,14 +342,21 @@ export function AccountCard({
           onSubmit={(e) => {
             e.preventDefault();
             void run(async () => {
-              await linkedinApi.update(workspaceId, account.id, {
-                daily_invites: invites,
-                working_hours: hours,
-                weekdays_only: weekdaysOnly,
-                test_mode: testMode,
-                ...(proxyId ? { proxy_id: proxyId } : {}),
-              });
-              setEditing(false);
+              const saved = await guarded((ack) =>
+                linkedinApi.update(
+                  workspaceId,
+                  account.id,
+                  {
+                    daily_invites: invites,
+                    working_hours: hours,
+                    weekdays_only: weekdaysOnly,
+                    test_mode: testMode,
+                    ...(proxyId ? { proxy_id: proxyId } : {}),
+                  },
+                  ack,
+                ),
+              );
+              if (saved) setEditing(false);
             });
           }}
         >
@@ -473,7 +489,11 @@ export function AccountCard({
           <button
             className="btn-ghost"
             disabled={busy}
-            onClick={() => void run(() => linkedinApi.setPaused(workspaceId, account.id, false))}
+            onClick={() =>
+              void run(() =>
+                guarded((ack) => linkedinApi.setPaused(workspaceId, account.id, false, ack)),
+              )
+            }
           >
             Resume
           </button>

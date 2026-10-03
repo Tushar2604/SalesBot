@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.deps import CurrentUser, Workspace_, client_ip
+from app.linkedin import risk
 from app.models.tenancy import WorkspaceRole
 from app.schemas.auth import (
     InviteCreatedResponse,
@@ -65,6 +66,43 @@ async def update_workspace(
             "workspace.outreach_paused"
             if payload.outreach_paused
             else "workspace.outreach_resumed",
+            workspace_id=ctx.workspace_id,
+            actor_user_id=ctx.user.id,
+            target_type="workspace",
+            target_id=ctx.workspace_id,
+            ip_address=client_ip(request),
+        )
+
+    if (
+        payload.allow_recontact is not None
+        and payload.allow_recontact != ctx.workspace.allow_recontact
+    ):
+        if payload.allow_recontact:
+            # A confirmation, not a strike: testing on your own profiles is fine,
+            # it is leaving this on for real prospects that gets accounts reported.
+            risk.require_acknowledgement(
+                [
+                    risk.Risk(
+                        "allow_recontact",
+                        "Contacting the same people again",
+                        "Meant for testing on your own or friendly profiles. Messaging real "
+                        "prospects repeatedly gets you reported as spam, which leads to "
+                        "restrictions. Turn it off before real outreach.",
+                    )
+                ],
+                payload.acknowledge_risk,
+            )
+        settings = dict(ctx.workspace.settings or {})
+        testing = {**settings.get("testing", {}), "allow_recontact": payload.allow_recontact}
+        settings["testing"] = testing
+        ctx.workspace.settings = settings
+        await audit.record(
+            db,
+            (
+                "workspace.recontact_enabled"
+                if payload.allow_recontact
+                else "workspace.recontact_disabled"
+            ),
             workspace_id=ctx.workspace_id,
             actor_user_id=ctx.user.id,
             target_type="workspace",

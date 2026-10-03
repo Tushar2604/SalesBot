@@ -61,7 +61,7 @@ export function ConversationList({
                   {c.last_message_from_me && <span className="text-slate-400">You: </span>}
                   {c.last_message_text || "No messages yet"}
                 </p>
-                {(c.label !== "none" || snoozed) && (
+                {(c.label !== "none" || snoozed || c.bot_draft) && (
                   <div className="mt-1.5 flex items-center gap-1.5">
                     {c.label !== "none" && (
                       <span className={`rounded-full px-2 py-0.5 text-[10.5px] font-semibold ${LABEL_META[c.label].className}`}>
@@ -71,6 +71,11 @@ export function ConversationList({
                     {snoozed && (
                       <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10.5px] font-semibold text-amber-600">
                         Snoozed
+                      </span>
+                    )}
+                    {c.bot_draft && (
+                      <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10.5px] font-semibold text-emerald-600">
+                        Draft ready
                       </span>
                     )}
                   </div>

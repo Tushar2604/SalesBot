@@ -1,19 +1,22 @@
 "use client";
 
 /**
- * Admin Settings. Manage Team reuses the real member/invite API. My Plan,
- * My Credits, API Key, Cross Account Settings and AI Config SOPs have no
- * billing/SOP backend in this environment, so they're local-only stubs that
- * still look and behave like the real screens (a generated key persists, a
- * plan can be "selected", etc).
+ * Admin Settings. Manage Team reuses the real member/invite API, AI Config
+ * manages the assistant's SOPs and API Key manages real API keys (the
+ * integration layer). My Plan, My Credits and Cross Account Settings have no
+ * billing backend in this environment, so they're local-only stubs that still
+ * look and behave like the real screens (a plan can be "selected", etc).
  */
 
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiError, type Invite, type Member, type WorkspaceRole } from "@/lib/api";
 import { hasRole, useSession } from "@/lib/session";
 import { useLocalState } from "@/lib/localSettings";
 import { TabBar } from "@/components/app/TabBar";
-import { IconCheckCircle, IconKey, IconTrash } from "@/components/app/icons";
+import { IconCheckCircle, IconTrash } from "@/components/app/icons";
+import { SopManager } from "@/components/assistant/SopManager";
+import { ApiKeysPanel } from "@/components/integrations/IntegrationPanels";
 
 const TABS = [
   { key: "manage-team", label: "Manage Team" },
@@ -66,19 +69,12 @@ const PLANS = [
   },
 ];
 
-function randomKey(): string {
-  const bytes = new Uint8Array(24);
-  window.crypto.getRandomValues(bytes);
-  return "sr_" + Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-}
-
 export default function AdminSettingsPage() {
   const { workspace } = useSession();
   const workspaceId = workspace?.id ?? null;
   const [tab, setTab] = useState("manage-team");
 
   const [plan, setPlan] = useLocalState(workspaceId, "admin-plan", { id: "professional", trial: true });
-  const [apiKey, setApiKey] = useLocalState<string | null>(workspaceId, "admin-api-key", null);
 
   if (!workspaceId) return <p className="text-sm text-slate-500">Select a workspace.</p>;
 
@@ -100,28 +96,19 @@ export default function AdminSettingsPage() {
 
       {tab === "ai-config" && (
         <div className="card">
-          <div className="mb-4 flex items-center justify-between gap-3">
-            <div>
-              <h2 className="font-medium text-ink-950">AI Inbox Manager SOP Configuration</h2>
-              <p className="text-sm text-slate-500">
-                After an SOP is created, it needs to be assigned to a campaign to be used for
-                generating AI-powered replies.
-              </p>
-            </div>
-            <div className="flex gap-2">
-              <button className="btn-primary" disabled>
-                Generate SOP
-              </button>
-              <button className="btn-ghost" disabled>
-                Upload SOP
-              </button>
-            </div>
+          <div className="mb-4">
+            <h2 className="font-medium text-ink-950">AI Inbox Manager SOP Configuration</h2>
+            <p className="text-sm text-slate-500">
+              Attach each SOP to the LinkedIn accounts it&apos;s for. When the AI assistant drafts a reply in
+              a conversation, it answers from the SOPs of that conversation&apos;s account, plus any SOP left on
+              &ldquo;All accounts&rdquo;. Tone, mode and limits live on the{" "}
+              <a href="/assistant" className="font-semibold text-brand-600 hover:underline">
+                AI Assistant
+              </a>{" "}
+              page.
+            </p>
           </div>
-          <input className="input mb-4" placeholder="Search SOPs by name..." disabled />
-          <div className="rounded-lg border border-dashed border-slate-200 px-4 py-10 text-center text-sm text-slate-400">
-            No SOPs found. Generating an SOP requires an LLM pipeline, which is not connected in
-            this environment.
-          </div>
+          <SopManager workspaceId={workspaceId} />
         </div>
       )}
 
@@ -176,38 +163,17 @@ export default function AdminSettingsPage() {
 
       {tab === "api-key" && (
         <div className="card">
-          {!apiKey ? (
-            <div className="flex flex-col items-center py-14 text-center">
-              <IconKey className="mb-4 h-10 w-10 text-brand-400" />
-              <p className="mb-1 font-medium text-ink-950">No API Key Generated</p>
-              <p className="mb-5 max-w-sm text-sm text-slate-500">
-                Generate an API key to authenticate and access the exposed API endpoints for your
-                account.
-              </p>
-              <button className="btn-primary" onClick={() => setApiKey(randomKey())}>
-                Generate API Key
-              </button>
-            </div>
-          ) : (
-            <div>
-              <p className="label">Your API key</p>
-              <div className="flex items-center gap-2">
-                <code className="input flex-1 select-all font-mono text-xs">{apiKey}</code>
-                <button className="btn-ghost" onClick={() => navigator.clipboard?.writeText(apiKey)}>
-                  Copy
-                </button>
-                <button className="btn-danger" onClick={() => setApiKey(null)}>
-                  Revoke
-                </button>
-              </div>
-            </div>
-          )}
+          <ApiKeysPanel workspaceId={workspaceId} />
           <div className="mt-6 flex items-center justify-between gap-4 rounded-lg border border-slate-200 bg-slate-50 p-4">
             <div>
-              <p className="text-sm font-semibold text-ink-950">API Documentation</p>
-              <p className="text-xs text-slate-500">View the full API reference to explore all available endpoints.</p>
+              <p className="text-sm font-semibold text-ink-950">Webhooks and API docs</p>
+              <p className="text-xs text-slate-500">
+                Send events to other tools, and see example requests for this workspace.
+              </p>
             </div>
-            <span className="text-xs font-semibold text-brand-600">docs coming soon</span>
+            <Link href="/integrations" className="btn-ghost shrink-0 text-xs">
+              Open Integrations
+            </Link>
           </div>
         </div>
       )}

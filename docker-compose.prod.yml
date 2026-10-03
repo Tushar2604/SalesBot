@@ -1,0 +1,199 @@
+# Production stack for one server. Everything sits behind Caddy (HTTPS);
+# only ports 80 and 443 are published.
+#
+#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
+#
+# Routing (one domain + one for media):
+#   https://$APP_DOMAIN/api/*   -> api   (REST + the sign-in WebSocket)
+#   https://$APP_DOMAIN/*       -> web   (Next.js)
+#   https://$FILES_DOMAIN/*     -> minio (signed media links only)
+
+name: salesrobo-prod
+
+x-api-env: &api-env
+  ENVIRONMENT: production
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  API_BASE_URL: https://${APP_DOMAIN:?set APP_DOMAIN}
+  WEB_BASE_URL: https://${APP_DOMAIN}
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-salesrobo}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-salesrobo}
+  REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/0
+  CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/1
+  CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/2
+  JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET}
+  ENCRYPTION_KEY: ${ENCRYPTION_KEY:?set ENCRYPTION_KEY}
+  ACCESS_TOKEN_TTL_MINUTES: ${ACCESS_TOKEN_TTL_MINUTES:-30}
+  REFRESH_TOKEN_TTL_DAYS: ${REFRESH_TOKEN_TTL_DAYS:-30}
+  S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
+  S3_PUBLIC_ENDPOINT_URL: ${S3_PUBLIC_ENDPOINT_URL:-https://${FILES_DOMAIN}}
+  S3_REGION: ${S3_REGION:-us-east-1}
+  S3_BUCKET: ${S3_BUCKET:-salesrobo}
+  S3_ACCESS_KEY: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY}
+  S3_SECRET_KEY: ${S3_SECRET_KEY:?set S3_SECRET_KEY}
+  AI_ASSISTANT_PROVIDERS: ${AI_ASSISTANT_PROVIDERS:-openai,gemini}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5-mini}
+  GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+  GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  AI_GENERATION_MODEL: ${AI_GENERATION_MODEL:-claude-opus-5}
+  AI_CLASSIFICATION_MODEL: ${AI_CLASSIFICATION_MODEL:-claude-haiku-4-5-20251001}
+  LINKEDIN_CLIENT_ID: ${LINKEDIN_CLIENT_ID:-}
+  LINKEDIN_CLIENT_SECRET: ${LINKEDIN_CLIENT_SECRET:-}
+  LINKEDIN_REDIRECT_URI: https://${APP_DOMAIN}/api/v1/linkedin/oauth/callback
+  LINKEDIN_API_VERSION: ${LINKEDIN_API_VERSION:-202409}
+  LINKEDIN_PUBLISHING_SCOPES: ${LINKEDIN_PUBLISHING_SCOPES:-openid profile w_member_social}
+  STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+  STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+  LINKEDIN_DRIVER: browser
+  LINKEDIN_ACCEPTANCE_MIN_AGE_MINUTES: ${LINKEDIN_ACCEPTANCE_MIN_AGE_MINUTES:-30}
+  # Every account through its own proxy. Only turn off if you truly know why.
+  REQUIRE_PROXY: ${REQUIRE_PROXY:-true}
+  SAFETY_DEFAULT_TEST_MODE: "true"
+  SAFETY_TEST_MODE_DAILY_INVITES: ${SAFETY_TEST_MODE_DAILY_INVITES:-3}
+  SAFETY_MAX_DAILY_INVITES: ${SAFETY_MAX_DAILY_INVITES:-75}
+  SAFETY_MAX_WEEKLY_INVITES: ${SAFETY_MAX_WEEKLY_INVITES:-100}
+  SAFETY_MIN_ACTION_GAP_SECONDS: ${SAFETY_MIN_ACTION_GAP_SECONDS:-45}
+  SAFETY_MEDIAN_ACTION_GAP_SECONDS: ${SAFETY_MEDIAN_ACTION_GAP_SECONDS:-240}
+  SAFETY_MAX_ACTION_GAP_SECONDS: ${SAFETY_MAX_ACTION_GAP_SECONDS:-1500}
+  REMOTE_BROWSER_MAX_CONCURRENT: ${REMOTE_BROWSER_MAX_CONCURRENT:-3}
+  REMOTE_BROWSER_TTL_SECONDS: ${REMOTE_BROWSER_TTL_SECONDS:-900}
+  REMOTE_BROWSER_IDLE_TIMEOUT_SECONDS: ${REMOTE_BROWSER_IDLE_TIMEOUT_SECONDS:-300}
+  BROWSER_PROFILES_DIR: /data/browser-profiles
+
+x-restart: &restart
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: {max-size: "20m", max-file: "5"}
+
+services:
+  postgres:
+    <<: *restart
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-salesrobo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-salesrobo}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-salesrobo} -d ${POSTGRES_DB:-salesrobo}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    <<: *restart
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD}"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "--no-auth-warning", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    <<: *restart
+    image: quay.io/minio/minio:latest
+    command: ["server", "/data"]
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY}
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Applies database migrations, then exits. api/worker/beat wait for it.
+  migrate:
+    build: {context: ./api, target: prod}
+    command: ["alembic", "upgrade", "head"]
+    environment: *api-env
+    depends_on:
+      postgres: {condition: service_healthy}
+    restart: "no"
+
+  api:
+    <<: *restart
+    build: {context: ./api, target: prod-with-browser}
+    init: true  # reaps the Chromium processes sign-in windows leave behind
+    shm_size: 1gb
+    environment: *api-env
+    volumes:
+      - browser_profiles:/data/browser-profiles
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+
+  # Every LinkedIn action runs in a real (headed) Chromium under Xvfb.
+  worker:
+    <<: *restart
+    build: {context: ./api, target: prod-with-browser}
+    init: true
+    shm_size: 1gb
+    command:
+      - sh
+      - -c
+      - >-
+        rm -f /tmp/.X99-lock;
+        Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp &
+        sleep 1;
+        exec celery -A app.worker.celery_app worker --loglevel=info --concurrency=4
+        -Q linkedin.action,linkedin.sync,email.send,ai,webhooks,content.publish,default
+    environment: *api-env
+    volumes:
+      - browser_profiles:/data/browser-profiles
+    healthcheck:
+      disable: true
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+
+  beat:
+    <<: *restart
+    build: {context: ./api, target: prod}
+    command: ["celery", "-A", "app.worker.celery_app", "beat", "--loglevel=info", "--schedule=/tmp/celerybeat-schedule"]
+    environment: *api-env
+    healthcheck:
+      disable: true
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+
+  web:
+    <<: *restart
+    build:
+      context: ./web
+      target: prod
+      args:
+        NEXT_PUBLIC_API_BASE_URL: https://${APP_DOMAIN}
+    environment:
+      API_INTERNAL_URL: http://api:8000
+    depends_on: [api]
+
+  caddy:
+    <<: *restart
+    image: caddy:2-alpine
+    ports: ["80:80", "443:443", "443:443/udp"]
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN}
+      FILES_DOMAIN: ${FILES_DOMAIN:?set FILES_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [web, api, minio]
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
+  browser_profiles:
+  caddy_data:
+  caddy_config:

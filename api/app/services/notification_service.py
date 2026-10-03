@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import NotFoundError
 from app.deps import WorkspaceContext
+from app.integrations import events as integration_events
 from app.models.tenancy import Notification, NotificationType
 
 
@@ -33,6 +34,10 @@ async def create(
     link: str = "",
 ) -> None:
     db.add(_build(workspace_id, type_, title, body=body, link=link))
+    if type_ in _ACCOUNT_ALERTS:
+        await integration_events.emit(
+            db, workspace_id, "account.needs_attention", _alert_data(type_, title, body)
+        )
 
 
 def create_sync(
@@ -46,6 +51,19 @@ def create_sync(
 ) -> None:
     """Worker-side variant — used by the sync poller and auth tasks."""
     db.add(_build(workspace_id, type_, title, body=body, link=link))
+    if type_ in _ACCOUNT_ALERTS:
+        integration_events.emit_sync(
+            db, workspace_id, "account.needs_attention", _alert_data(type_, title, body)
+        )
+
+
+# Every place that pauses, restricts or disconnects an account already raises
+# one of these, so hooking here reaches webhooks from all of them.
+_ACCOUNT_ALERTS = frozenset({NotificationType.ACCOUNT_ACTION_NEEDED, NotificationType.ACCOUNT_RISK})
+
+
+def _alert_data(type_: NotificationType, title: str, body: str) -> dict[str, str]:
+    return {"kind": type_.value, "title": title, "detail": body}
 
 
 async def list_for_workspace(

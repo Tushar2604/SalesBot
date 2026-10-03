@@ -24,6 +24,12 @@ x-api-env: &api-env
   OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5-mini}
   GEMINI_API_KEY: ${GEMINI_API_KEY:-}
   GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+  LEAD_SEARCH_PROVIDERS: ${LEAD_SEARCH_PROVIDERS:-exa,pdl,apollo,brave}
+  EXA_API_KEY: ${EXA_API_KEY:-}
+  PDL_API_KEY: ${PDL_API_KEY:-}
+  APOLLO_API_KEY: ${APOLLO_API_KEY:-}
+  BRAVE_SEARCH_API_KEY: ${BRAVE_SEARCH_API_KEY:-}
+  LEAD_SEARCH_DAILY_LIMIT: ${LEAD_SEARCH_DAILY_LIMIT:-50}
   LINKEDIN_CLIENT_ID: ${LINKEDIN_CLIENT_ID:-}
   LINKEDIN_CLIENT_SECRET: ${LINKEDIN_CLIENT_SECRET:-}
   LINKEDIN_REDIRECT_URI: ${LINKEDIN_REDIRECT_URI:-http://localhost:8010/api/v1/linkedin/oauth/callback}
@@ -34,14 +40,14 @@ x-api-env: &api-env
   STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
   STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
   LINKEDIN_DRIVER: ${LINKEDIN_DRIVER:-browser}
-  LINKEDIN_ACCEPTANCE_MIN_AGE_MINUTES: ${LINKEDIN_ACCEPTANCE_MIN_AGE_MINUTES:-60}
+  LINKEDIN_ACCEPTANCE_MIN_AGE_MINUTES: ${LINKEDIN_ACCEPTANCE_MIN_AGE_MINUTES:-30}
   SAFETY_DEFAULT_TEST_MODE: ${SAFETY_DEFAULT_TEST_MODE:-true}
   SAFETY_TEST_MODE_DAILY_INVITES: ${SAFETY_TEST_MODE_DAILY_INVITES:-3}
   SAFETY_MAX_DAILY_INVITES: ${SAFETY_MAX_DAILY_INVITES:-75}
   SAFETY_MAX_WEEKLY_INVITES: ${SAFETY_MAX_WEEKLY_INVITES:-100}
-  SAFETY_MIN_ACTION_GAP_SECONDS: ${SAFETY_MIN_ACTION_GAP_SECONDS:-45}
-  SAFETY_MEDIAN_ACTION_GAP_SECONDS: ${SAFETY_MEDIAN_ACTION_GAP_SECONDS:-240}
-  SAFETY_MAX_ACTION_GAP_SECONDS: ${SAFETY_MAX_ACTION_GAP_SECONDS:-1500}
+  SAFETY_MIN_ACTION_GAP_SECONDS: ${SAFETY_MIN_ACTION_GAP_SECONDS:-120}
+  SAFETY_MEDIAN_ACTION_GAP_SECONDS: ${SAFETY_MEDIAN_ACTION_GAP_SECONDS:-300}
+  SAFETY_MAX_ACTION_GAP_SECONDS: ${SAFETY_MAX_ACTION_GAP_SECONDS:-600}
   # Remote-browser login (Phase 1) — only the `api` service ever launches a
   # session, but these are harmless as unused config on worker/beat too, so
   # they stay in the one shared anchor rather than a second block.
@@ -111,6 +117,10 @@ services:
     ports: ["8010:8000"]
     volumes:
       - ./api:/srv
+      # One saved Chromium profile per LinkedIn account, shared with the worker
+      # so sign-in and every later action look like the same computer. A named
+      # volume, not the repo: these hold live session cookies.
+      - browser_profiles:/data/browser-profiles
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
@@ -137,6 +147,7 @@ services:
     environment: *api-env
     volumes:
       - ./api:/srv
+      - browser_profiles:/data/browser-profiles
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
@@ -189,3 +200,4 @@ volumes:
   miniodata:
   web_node_modules:
   web_next:
+  browser_profiles:

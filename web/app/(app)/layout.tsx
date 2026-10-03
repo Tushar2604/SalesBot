@@ -15,6 +15,7 @@ import { AppSidebar } from "@/components/app/AppSidebar";
 import { AppTopbar } from "@/components/app/AppTopbar";
 import { GettingStartedCard } from "@/components/app/GettingStartedCard";
 import { useOnboardingProgress } from "@/lib/onboarding";
+import { RiskGuardProvider } from "@/components/RiskGuard";
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
@@ -35,12 +36,20 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   }
 
   return (
+    <RiskGuardProvider>
     <div className="flex min-h-screen bg-white">
       <AppSidebar collapsed={collapsed} />
 
       <div className="flex min-w-0 flex-1 flex-col bg-white">
         <AppTopbar collapsed={collapsed} onToggle={() => setCollapsed((v) => !v)} />
 
+        {workspace?.allow_recontact && (
+          <div className="border-b border-amber-200 bg-amber-50 px-6 py-3 text-sm text-amber-800">
+            <strong className="font-semibold">Testing mode is on:</strong> leads can be contacted
+            again and again. Use it only on test profiles and turn it off in Team before real
+            outreach.
+          </div>
+        )}
         {workspace?.outreach_paused && (
           <div className="border-b border-amber-200 bg-amber-50 px-6 py-3 text-sm text-amber-700">
             <strong className="font-semibold">Outreach is paused</strong> for this workspace. No
@@ -60,5 +69,6 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
         </main>
       </div>
     </div>
+    </RiskGuardProvider>
   );
 }

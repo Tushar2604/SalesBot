@@ -11,21 +11,25 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Response, status
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.core.errors import NotFoundError
 from app.db import get_db
-from app.deps import Workspace_
+from app.deps import Workspace_, WorkspaceContext
 from app.linkedin import caps as caps_mod
-from app.linkedin import health
+from app.linkedin import health, risk
+from app.models.assistant import AssistantProfile
 from app.models.campaigns import (
     ActionTask,
     Campaign,
     CampaignLead,
     CampaignStatus,
     StepType,
+    TaskStatus,
 )
+from app.models.inbox import Conversation, Message, MessageAuthor, MessageDirection
 from app.models.leads import Lead
 from app.models.linkedin import LinkedInAccount, LinkedInAccountStatus
 from app.models.tenancy import WorkspaceRole
@@ -51,7 +55,7 @@ from app.schemas.outreach import (
     TrackingLeadResponse,
     TrackingSummaryResponse,
 )
-from app.services import campaign_service, tracking, tracking_queries
+from app.services import assistant_service, campaign_service, tracking, tracking_queries
 
 router = APIRouter(prefix="/workspaces/{workspace_id}", tags=["campaigns"])
 
@@ -70,6 +74,28 @@ def _specs(steps: list[StepRequest]) -> list[campaign_service.StepSpec]:
         )
         for step in steps
     ]
+
+
+def _timing_of(specs: list[campaign_service.StepSpec]) -> list[dict[str, object]]:
+    return [{"timing": s.timing, "delay_minutes": s.delay_minutes} for s in specs]
+
+
+async def _guard_timing(
+    db: AsyncSession,
+    ctx: Workspace_,
+    account_id: uuid.UUID,
+    new: list[dict[str, object]],
+    old: list[dict[str, object]],
+    acknowledged: bool,
+) -> None:
+    """Refuses newly risky step timing (ASAP, very short waits) until accepted.
+    Risks the campaign already had were accepted when they were introduced."""
+    already = {r.key for r in risk.step_risks(old)}
+    risks = [r for r in risk.step_risks(new) if r.key not in already]
+    risk.require_acknowledgement(risks, acknowledged)
+    account = await db.get(LinkedInAccount, account_id)
+    if account is not None and account.workspace_id == ctx.workspace_id:
+        await risk.record_overrides(db, [account], risks, ctx.user.id)
 
 
 async def _launch_blockers(
@@ -94,6 +120,12 @@ async def _launch_blockers(
         blockers.append("The LinkedIn account for this campaign no longer exists.")
         return blockers, None
 
+    if settings.proxy_required and account.proxy_id is None:
+        blockers.append(
+            "The LinkedIn account has no proxy. Add one on the accounts page: without it the "
+            "account shares this server's IP with every other account."
+        )
+
     if account.status is not LinkedInAccountStatus.ACTIVE:
         blockers.append(
             f"The LinkedIn account is {account.status.value.replace('_', ' ')} — "
@@ -110,6 +142,10 @@ async def _launch_blockers(
 async def _to_response(db: AsyncSession, campaign: Campaign) -> CampaignResponse:
     stats = await campaign_service.campaign_stats(db, campaign)
     blockers, account = await _launch_blockers(db, campaign)
+    picked = assistant_service.campaign_assistant_id(campaign)
+    profile = await db.get(AssistantProfile, picked) if picked else None
+    if profile is not None and profile.workspace_id != campaign.workspace_id:
+        profile = None
 
     return CampaignResponse(
         id=campaign.id,
@@ -141,7 +177,22 @@ async def _to_response(db: AsyncSession, campaign: Campaign) -> CampaignResponse
         completed_at=campaign.completed_at,
         created_at=campaign.created_at,
         launch_blockers=blockers,
+        ai_brief=str((campaign.settings or {}).get("ai_brief", "")),
+        assistant_id=profile.id if profile else None,
+        assistant_name=profile.name if profile else "Default assistant",
     )
+
+
+async def _set_assistant(
+    db: AsyncSession, ctx: WorkspaceContext, campaign: Campaign, assistant_id: uuid.UUID | None
+) -> None:
+    """Points the campaign at a named assistant (None = the default one)."""
+    rest = {k: v for k, v in (campaign.settings or {}).items() if k != "assistant_id"}
+    if assistant_id is not None:
+        await assistant_service.get_profile(db, ctx.workspace_id, assistant_id)  # 404 if foreign
+        rest["assistant_id"] = str(assistant_id)
+    # Reassigned, not mutated, so SQLAlchemy sees the JSONB change.
+    campaign.settings = rest
 
 
 @router.get("/campaigns", response_model=list[CampaignResponse])
@@ -157,8 +208,13 @@ async def create_campaign(
     payload: CampaignCreateRequest,
     ctx: Workspace_,
     db: Annotated[AsyncSession, Depends(get_db)],
+    acknowledge_risk: bool = False,
 ) -> CampaignResponse:
     ctx.require_role(WorkspaceRole.MEMBER)
+    new_timing = _timing_of(_specs(payload.steps))
+    await _guard_timing(db, ctx, payload.linkedin_account_id, new_timing, [], acknowledge_risk)
+    if payload.assistant_id is not None:
+        await assistant_service.get_profile(db, ctx.workspace_id, payload.assistant_id)
     campaign = await campaign_service.create_campaign(
         db,
         ctx,
@@ -167,6 +223,9 @@ async def create_campaign(
         steps=_specs(payload.steps),
         stop_on_reply=payload.stop_on_reply,
     )
+    await _set_assistant(db, ctx, campaign, payload.assistant_id)
+    if payload.ai_brief.strip():
+        campaign.settings = {**(campaign.settings or {}), "ai_brief": payload.ai_brief.strip()}
     return await _to_response(db, campaign)
 
 
@@ -191,6 +250,11 @@ async def update_campaign(
         campaign.name = payload.name.strip()
     if payload.stop_on_reply is not None:
         campaign.stop_on_reply = payload.stop_on_reply
+    if payload.ai_brief is not None:
+        # Reassigned, not mutated, so SQLAlchemy sees the JSONB change.
+        campaign.settings = {**(campaign.settings or {}), "ai_brief": payload.ai_brief.strip()}
+    if "assistant_id" in payload.model_fields_set:
+        await _set_assistant(db, ctx, campaign, payload.assistant_id)
     return await _to_response(db, campaign)
 
 
@@ -200,9 +264,18 @@ async def replace_steps(
     payload: list[StepRequest],
     ctx: Workspace_,
     db: Annotated[AsyncSession, Depends(get_db)],
+    acknowledge_risk: bool = False,
 ) -> CampaignResponse:
     ctx.require_role(WorkspaceRole.MEMBER)
     campaign = await campaign_service.get_campaign(db, ctx.workspace_id, campaign_id)
+    old = [
+        {"timing": (st.config or {}).get("timing", "smart"),
+         "delay_minutes": (st.config or {}).get("delay_minutes")}
+        for st in campaign.steps
+    ]
+    await _guard_timing(
+        db, ctx, campaign.linkedin_account_id, _timing_of(_specs(payload)), old, acknowledge_risk
+    )
     campaign = await campaign_service.replace_steps(db, ctx, campaign, _specs(payload))
     return await _to_response(db, campaign)
 
@@ -284,6 +357,7 @@ async def list_enrollments(
             .offset(offset)
         )
     ).all()
+    feedback = await _lead_feedback(db, campaign, [(e, lead) for e, lead in rows])
 
     return EnrollmentPage(
         items=[
@@ -302,11 +376,114 @@ async def list_enrollments(
                 replied_at=enrollment.replied_at,
                 last_error=enrollment.last_error,
                 stopped_reason=enrollment.stopped_reason,
+                viewed_at=enrollment.viewed_at,
+                connection_state=enrollment.connection_state,
+                **feedback.get(enrollment.id, {}),
             )
             for enrollment, lead in rows
         ],
         total=total,
     )
+
+
+async def _lead_feedback(
+    db: AsyncSession, campaign: Campaign, rows: list[tuple[CampaignLead, Lead]]
+) -> dict[uuid.UUID, dict[str, object]]:
+    """Per lead: the queued next action, their latest reply, and what the
+    assistant is doing in that thread. A few batched queries for the page."""
+    if not rows:
+        return {}
+    enrollment_ids = [e.id for e, _ in rows]
+    lead_ids = [lead.id for _, lead in rows]
+    out: dict[uuid.UUID, dict[str, object]] = {e.id: {} for e, _ in rows}
+
+    for task in (
+        await db.execute(
+            select(ActionTask)
+            .where(
+                ActionTask.campaign_lead_id.in_(enrollment_ids),
+                ActionTask.status.in_([TaskStatus.PENDING, TaskStatus.DISPATCHED]),
+            )
+            .order_by(ActionTask.scheduled_at)
+        )
+    ).scalars():
+        entry = out[task.campaign_lead_id]  # type: ignore[index]
+        if "next_action" not in entry:
+            entry["next_action"] = task.action_type
+            entry["next_action_at"] = task.scheduled_at
+
+    conversations = list(
+        (
+            await db.execute(
+                select(Conversation).where(
+                    Conversation.linkedin_account_id == campaign.linkedin_account_id,
+                    or_(
+                        Conversation.campaign_lead_id.in_(enrollment_ids),
+                        Conversation.lead_id.in_(lead_ids),
+                    ),
+                )
+            )
+        ).scalars()
+    )
+    if not conversations:
+        return out
+
+    by_enrollment = {c.campaign_lead_id: c for c in conversations if c.campaign_lead_id}
+    by_lead = {c.lead_id: c for c in conversations if c.lead_id}
+    conversation_ids = [c.id for c in conversations]
+
+    latest_inbound = {
+        m.conversation_id: m
+        for m in (
+            await db.execute(
+                select(Message)
+                .where(
+                    Message.conversation_id.in_(conversation_ids),
+                    Message.direction == MessageDirection.INBOUND,
+                )
+                .distinct(Message.conversation_id)
+                .order_by(Message.conversation_id, Message.sent_at.desc())
+            )
+        ).scalars()
+    }
+    latest_any = {
+        m.conversation_id: m
+        for m in (
+            await db.execute(
+                select(Message)
+                .where(Message.conversation_id.in_(conversation_ids))
+                .distinct(Message.conversation_id)
+                .order_by(Message.conversation_id, Message.sent_at.desc())
+            )
+        ).scalars()
+    }
+
+    for enrollment, lead in rows:
+        conversation = by_enrollment.get(enrollment.id) or by_lead.get(lead.id)
+        if conversation is None:
+            continue
+        entry = out[enrollment.id]
+        entry["conversation_id"] = conversation.id
+        reply = latest_inbound.get(conversation.id)
+        if reply is not None:
+            entry["last_reply_text"] = reply.body[:500]
+            entry["last_reply_at"] = reply.sent_at
+        entry["bot_send_at"] = conversation.bot_send_at
+        last = latest_any.get(conversation.id)
+        if conversation.bot_paused:
+            reason = conversation.bot_pause_reason or ""
+            entry["bot_status"] = "needs_you" if reason.startswith("Needs you") else "paused"
+        elif conversation.bot_send_at is not None and conversation.bot_draft:
+            entry["bot_status"] = "reply_scheduled"
+        elif conversation.bot_draft:
+            entry["bot_status"] = "draft_ready"
+        elif (
+            last is not None
+            and last.direction is MessageDirection.OUTBOUND
+            and last.author == MessageAuthor.BOT.value
+        ):
+            entry["bot_status"] = "bot_replied"
+    return out
 
 
 @router.get("/campaigns/{campaign_id}/activity", response_model=list[ActionTaskResponse])
@@ -342,6 +519,7 @@ async def list_activity(
             error_class=task.error_class,
             error_detail=task.error_detail,
             lead_public_id=lead.public_id,
+            lead_name=lead.full_name or lead.public_id,
         )
         for task, lead in rows
     ]

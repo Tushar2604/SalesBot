@@ -768,7 +768,102 @@ def test_gaps_are_right_skewed_not_uniform() -> None:
     # Log-normal: the mean sits above the median. A uniform distribution would
     # put them on top of each other.
     assert mean > median * 1.05, f"mean {mean:.0f} vs median {median:.0f} looks uniform"
-    assert len(set(samples)) > 500, "too little variation between gaps"
+    # Gaps are whole seconds, so the window caps how many distinct values exist.
+    possible = settings.safety_max_action_gap_seconds - settings.safety_min_action_gap_seconds + 1
+    assert len(set(samples)) > min(500, possible * 0.8), "too little variation between gaps"
+    # Truncated, not clamped: no pile-up of identical gaps at either bound.
+    for bound in (settings.safety_min_action_gap_seconds, settings.safety_max_action_gap_seconds):
+        assert samples.count(bound) < len(samples) * 0.02, f"gaps pile up at {bound}s"
+
+
+def test_a_launch_works_down_the_list_one_lead_at_a_time() -> None:
+    """Leads enter a sequence a random few minutes apart, not all at once."""
+    import random as _random
+    from itertools import pairwise
+
+    offsets = pacing.pipeline_start_offsets(6, _random.Random(7))
+    assert offsets[0] == timedelta(0)
+    gaps = [(b - a).total_seconds() for a, b in pairwise(offsets)]
+    assert all(
+        settings.safety_min_action_gap_seconds <= g <= settings.safety_max_action_gap_seconds
+        for g in gaps
+    )
+    assert len(set(gaps)) == len(gaps), "every gap should be different"
+
+
+def test_a_five_lead_campaign_runs_as_a_paced_pipeline(sdb: Session) -> None:
+    """Launch with five leads: one action at a time, random 2-10 minute gaps,
+    and leads interleaved (A's invite does not wait for E's profile view)."""
+    from app.services.campaign_service import _stagger_starts
+
+    workspace = make_workspace(sdb)
+    account = make_account(sdb, workspace)
+    leads = make_leads(sdb, workspace, 5)
+    campaign = make_campaign(
+        sdb,
+        workspace,
+        account,
+        [
+            (StepType.VIEW_PROFILE, 0, StepCondition.ALWAYS),
+            (StepType.INVITE, 0, StepCondition.ALWAYS),
+        ],
+    )
+    enrollments = enroll(sdb, campaign, account, leads)
+    _stagger_starts(campaign, enrollments, START)
+    sdb.flush()
+
+    dispatched, _ = advance(sdb, START, steps=200, stop_after=10)
+    assert len(dispatched) == 10
+
+    from itertools import pairwise
+
+    times = sorted(t.dispatched_at for t in dispatched if t.dispatched_at)
+    gaps = [(b - a).total_seconds() for a, b in pairwise(times)]
+    # One tick is a minute, so a gap can be up to a tick longer than drawn.
+    assert all(
+        settings.safety_min_action_gap_seconds
+        <= g
+        <= settings.safety_max_action_gap_seconds + 60
+        for g in gaps
+    ), gaps
+
+    order = [
+        (t.action_type, t.campaign_lead_id)
+        for t in sorted(dispatched, key=lambda t: t.dispatched_at or START)
+    ]
+    first_invite = next(i for i, (a, _) in enumerate(order) if a is StepType.INVITE)
+    last_view = max(i for i, (a, _) in enumerate(order) if a is StepType.VIEW_PROFILE)
+    assert first_invite < last_view, "invites should start before every profile is viewed"
+
+
+def test_a_capped_action_type_does_not_block_the_others(sdb: Session) -> None:
+    """The day's invite budget running out must not freeze profile views and
+    messages queued behind the next invite."""
+    workspace = make_workspace(sdb)
+    account = make_account(sdb, workspace, daily_invites=1)
+    quota.consume(sdb, account, StepType.INVITE, now=START)
+
+    def task(action: StepType, at: datetime) -> ActionTask:
+        row = ActionTask(
+            workspace_id=workspace.id,
+            linkedin_account_id=account.id,
+            action_type=action,
+            payload={},
+            scheduled_at=at,
+            status=TaskStatus.PENDING,
+            idempotency_key=uuid.uuid4().hex,
+        )
+        sdb.add(row)
+        return row
+
+    capped_invite = task(StepType.INVITE, START - timedelta(minutes=10))
+    view = task(StepType.VIEW_PROFILE, START - timedelta(minutes=5))
+    sdb.flush()
+
+    decision = dispatcher.dispatch_for_account(sdb, account, workspace, START)
+
+    assert decision.dispatched and decision.task_id == view.id
+    assert capped_invite.status is TaskStatus.PENDING  # kept for tomorrow, not lost
 
 
 def test_two_accounts_do_not_share_a_schedule(sdb: Session) -> None:

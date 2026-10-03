@@ -14,7 +14,7 @@
 // Matches the compose port mapping. Not 8000: that port is commonly taken by
 // another local dev server, and a wrong fallback would silently send
 // authenticated requests to a stranger's API.
-const API_BASE =
+export const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ?? "http://localhost:8010";
 
 let accessToken: string | null = null;
@@ -40,6 +40,18 @@ export class ApiError extends Error {
     this.code = code;
     this.details = details;
   }
+}
+
+export type RiskLevel = "safe" | "watch" | "at_risk" | "critical";
+
+/** One way a requested change leaves the safe policy (see api/app/linkedin/risk.py). */
+export type Risk = { key: string; title: string; detail: string };
+
+/** The risks behind a `risk_confirmation_required` error, or null for any other error. */
+export function risksOf(err: unknown): Risk[] | null {
+  if (!(err instanceof ApiError) || err.code !== "risk_confirmation_required") return null;
+  const risks = err.details.risks;
+  return Array.isArray(risks) ? (risks as Risk[]) : [];
 }
 
 type ApiErrorBody = {
@@ -206,6 +218,8 @@ export type Workspace = {
   name: string;
   slug: string;
   outreach_paused: boolean;
+  /** Testing mode: the same people may be contacted again. */
+  allow_recontact?: boolean;
   created_at: string;
 };
 
@@ -215,6 +229,8 @@ export type User = {
   full_name: string;
   timezone: string;
   is_active: boolean;
+  /** Platform operator: can open the admin panel. */
+  is_superuser?: boolean;
   created_at: string;
 };
 
@@ -292,8 +308,15 @@ export const api = {
   createWorkspace: (name: string) =>
     apiFetch<Workspace>("/workspaces", { method: "POST", body: { name } }),
 
-  updateWorkspace: (id: string, patch: { name?: string; outreach_paused?: boolean }) =>
-    apiFetch<Workspace>(`/workspaces/${id}`, { method: "PATCH", body: patch }),
+  updateWorkspace: (
+    id: string,
+    patch: { name?: string; outreach_paused?: boolean; allow_recontact?: boolean },
+    acknowledgeRisk = false,
+  ) =>
+    apiFetch<Workspace>(`/workspaces/${id}`, {
+      method: "PATCH",
+      body: { ...patch, acknowledge_risk: acknowledgeRisk },
+    }),
 
   members: (workspaceId: string) => apiFetch<Member[]>(`/workspaces/${workspaceId}/members`),
 
@@ -338,6 +361,7 @@ export type EffectiveCaps = {
   daily_invites: number;
   daily_messages: number;
   daily_views: number;
+  daily_likes: number;
   weekly_invites: number;
   working_hours: WorkingHours;
   weekdays_only: boolean;
@@ -378,11 +402,16 @@ export type LinkedInAccount = {
   caps: EffectiveCaps;
   within_working_hours: boolean;
   working_hours_detail: string;
+  auto_like_enabled: boolean;
   device: string;
   proxy_label: string;
   proxy_country: string;
   using_direct_connection: boolean;
   warnings: string[];
+  /** Safety warnings in the last 30 days; the account pauses itself at warning_limit. */
+  warning_count: number;
+  warning_limit: number;
+  risk_level: RiskLevel;
   publishing: AccountPublishingStatus;
   session_updated_at: string | null;
   last_action_at: string | null;
@@ -406,19 +435,80 @@ export type ProxyRecord = {
   city: string;
   status: "untested" | "healthy" | "degraded" | "dead";
   last_exit_ip: string;
+  /** Where the proxy was measured to exit — what LinkedIn actually sees. */
+  exit_country?: string;
   last_checked_at: string | null;
   assigned_account_id: string | null;
   created_at: string;
+};
+
+export type FeedPost = {
+  urn: string;
+  author_name: string;
+  author_headline: string;
+  author_avatar_url: string;
+  text: string;
+  liked: boolean;
+  like_count: number;
+  comment_count: number;
+  image_urls: string[];
+  /** A like on this post is queued but has not run yet — see the pacing note on `likePost`. */
+  like_pending: boolean;
+};
+
+export type FeedResponse = {
+  posts: FeedPost[];
+  fetched_at: string | null;
+  refreshing: boolean;
+};
+
+export type AutoLikeRules = {
+  /** "any": like any post; "topics": only posts about `topics`. `exclude` always wins. */
+  mode: "any" | "topics";
+  topics: string[];
+  exclude: string[];
+  /** Match by meaning with the AI provider (keywords when off or unavailable). */
+  use_ai: boolean;
+};
+
+export type AutoLikeRulesResponse = AutoLikeRules & {
+  auto_like_enabled: boolean;
+  ai_available: boolean;
+  suggested_topics: string[];
+  suggested_excludes: string[];
+};
+
+export type AutoLikePreview = {
+  rules: AutoLikeRules;
+  matching: number;
+  posts: {
+    urn: string;
+    author_name: string;
+    text: string;
+    liked: boolean;
+    would_like: boolean;
+    topic: string;
+    reason: string;
+    matched_by: string;
+  }[];
+};
+
+export type LikeTaskResponse = {
+  task_id: string;
+  status: string;
+  post_urn: string;
 };
 
 export type CapsPatch = {
   daily_invites?: number;
   daily_messages?: number;
   daily_views?: number;
+  daily_likes?: number;
   weekly_invites?: number;
   working_hours?: WorkingHours;
   weekdays_only?: boolean;
   test_mode?: boolean;
+  auto_like_enabled?: boolean;
   timezone?: string;
   label?: string;
   proxy_id?: string;
@@ -472,15 +562,15 @@ export const linkedinApi = {
       method: "POST",
     }),
 
-  update: (ws: string, id: string, patch: CapsPatch) =>
+  update: (ws: string, id: string, patch: CapsPatch, acknowledgeRisk = false) =>
     apiFetch<LinkedInAccount>(`/workspaces/${ws}/linkedin-accounts/${id}`, {
       method: "PATCH",
-      body: patch,
+      body: { ...patch, acknowledge_risk: acknowledgeRisk },
     }),
 
-  setPaused: (ws: string, id: string, paused: boolean) =>
+  setPaused: (ws: string, id: string, paused: boolean, acknowledgeRisk = false) =>
     apiFetch<LinkedInAccount>(
-      `/workspaces/${ws}/linkedin-accounts/${id}/pause?paused=${paused}`,
+      `/workspaces/${ws}/linkedin-accounts/${id}/pause?paused=${paused}&acknowledge_risk=${acknowledgeRisk}`,
       { method: "POST" },
     ),
 
@@ -491,6 +581,41 @@ export const linkedinApi = {
 
   remove: (ws: string, id: string) =>
     apiFetch<void>(`/workspaces/${ws}/linkedin-accounts/${id}`, { method: "DELETE" }),
+
+  // Feed: viewing/liking real posts through our own UI. Liking does not fire
+  // instantly — it is queued and runs on the account's own pacing, exactly
+  // like an invite or a message, so a "liked" state can lag a click by a
+  // while. See LikeTaskResponse.status ("pending" | "dispatched" | ...).
+  feed: (ws: string, id: string) =>
+    apiFetch<FeedResponse>(`/workspaces/${ws}/linkedin-accounts/${id}/feed`),
+
+  refreshFeed: (ws: string, id: string) =>
+    apiFetch<FeedResponse>(`/workspaces/${ws}/linkedin-accounts/${id}/feed/refresh`, {
+      method: "POST",
+    }),
+
+  likePost: (ws: string, id: string, postUrn: string) =>
+    apiFetch<LikeTaskResponse>(`/workspaces/${ws}/linkedin-accounts/${id}/feed/like`, {
+      method: "POST",
+      body: { post_urn: postUrn },
+    }),
+
+  /** Which posts auto-like may pick (topics to like, topics to never like). */
+  autoLikeRules: (ws: string, id: string) =>
+    apiFetch<AutoLikeRulesResponse>(`/workspaces/${ws}/linkedin-accounts/${id}/auto-like-rules`),
+
+  saveAutoLikeRules: (ws: string, id: string, rules: AutoLikeRules) =>
+    apiFetch<AutoLikeRulesResponse>(`/workspaces/${ws}/linkedin-accounts/${id}/auto-like-rules`, {
+      method: "PUT",
+      body: rules,
+    }),
+
+  /** What these rules would do with the posts cached right now. Likes nothing. */
+  previewAutoLikeRules: (ws: string, id: string, rules: AutoLikeRules) =>
+    apiFetch<AutoLikePreview>(`/workspaces/${ws}/linkedin-accounts/${id}/auto-like-rules/preview`, {
+      method: "POST",
+      body: rules,
+    }),
 
   proxies: (ws: string) => apiFetch<ProxyRecord[]>(`/workspaces/${ws}/proxies`),
 
@@ -508,7 +633,12 @@ export const linkedinApi = {
       city?: string;
       sticky_session_id?: string;
     },
-  ) => apiFetch<ProxyRecord>(`/workspaces/${ws}/proxies`, { method: "POST", body }),
+    acknowledgeRisk = false,
+  ) =>
+    apiFetch<ProxyRecord>(`/workspaces/${ws}/proxies`, {
+      method: "POST",
+      body: { ...body, acknowledge_risk: acknowledgeRisk },
+    }),
 
   removeProxy: (ws: string, id: string) =>
     apiFetch<void>(`/workspaces/${ws}/proxies/${id}`, { method: "DELETE" }),

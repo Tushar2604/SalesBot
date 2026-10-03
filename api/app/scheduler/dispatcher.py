@@ -7,7 +7,8 @@ this order, and the first failure wins:
   2. account status (active, not paused/blocked/challenged)
   3. circuit breaker
   4. the single execution slot (is this account already acting?)
-  5. pacing — has the log-normal gap elapsed?
+  5. action gap — has the log-normal gap since the last action elapsed?
+     (app/linkedin/guard.py; enforced again inside the driver at send time)
   6. working hours, in the account's own timezone
   7. quota — daily cap, then the trailing 7-day invite ceiling
 
@@ -27,7 +28,7 @@ from sqlalchemy.orm import Session
 
 from app.core.logging import get_logger
 from app.linkedin import caps as caps_mod
-from app.linkedin import health
+from app.linkedin import guard, health
 from app.models.campaigns import ActionTask, TaskStatus
 from app.models.linkedin import LinkedInAccount, LinkedInAccountStatus
 from app.models.tenancy import Workspace
@@ -104,24 +105,55 @@ def _accounts_with_due_work(db: Session, now: datetime) -> list[LinkedInAccount]
     )
 
 
-def _claim_next_task(db: Session, account: LinkedInAccount, now: datetime) -> ActionTask | None:
-    """Claims one due task for this account.
+# How many due tasks the claim looks through for one whose action type still
+# has budget today.
+_CLAIM_WINDOW = 25
+
+
+def _claim_next_task(
+    db: Session, account: LinkedInAccount, now: datetime
+) -> tuple[ActionTask | None, str]:
+    """Claims the earliest due task whose action type still has budget today.
+
+    Returns (task, "") or (None, why nothing was claimed). Quota is per action
+    type, so a capped type must not block the rest: with only the single
+    earliest task considered, the day's last invite over the cap sat at the
+    head of the queue and starved every profile view and message behind it
+    until midnight.
 
     `FOR UPDATE SKIP LOCKED` so two dispatcher replicas never hand the same
     task to two workers.
     """
-    task = db.execute(
-        select(ActionTask)
-        .where(
-            ActionTask.linkedin_account_id == account.id,
-            ActionTask.status == TaskStatus.PENDING,
-            ActionTask.scheduled_at <= now,
+    candidates = (
+        db.execute(
+            select(ActionTask)
+            .where(
+                ActionTask.linkedin_account_id == account.id,
+                ActionTask.status == TaskStatus.PENDING,
+                ActionTask.scheduled_at <= now,
+            )
+            .order_by(ActionTask.scheduled_at)
+            .limit(_CLAIM_WINDOW)
+            .with_for_update(skip_locked=True)
         )
-        .order_by(ActionTask.scheduled_at)
-        .limit(1)
-        .with_for_update(skip_locked=True)
-    ).scalar_one_or_none()
-    return task
+        .scalars()
+        .all()
+    )
+    if not candidates:
+        return None, "no due task"
+
+    verdicts: dict[object, quota.QuotaVerdict] = {}
+    first_block = ""
+    for task in candidates:
+        if task.action_type not in verdicts:
+            verdicts[task.action_type] = quota.check(db, account, task.action_type, now=now)
+        verdict = verdicts[task.action_type]
+        if verdict.allowed:
+            return task, ""
+        first_block = first_block or verdict.reason
+    # Every due task is capped: stays PENDING and is retried after midnight
+    # local — no work is lost.
+    return None, first_block
 
 
 def evaluate_gates(
@@ -169,6 +201,13 @@ def evaluate_gates(
     if db.scalar(in_flight_query):
         return "slot busy: an action is already dispatched for this account"
 
+    # The human-like gap since this account's last action, from any part of
+    # the product. The driver enforces it again at send time (guard.reserve);
+    # checking here just avoids claiming a task that would only be put back.
+    next_at = guard.earliest(account, now)
+    if next_at > now:
+        return f"action gap: next action allowed at {next_at.isoformat(timespec='seconds')}"
+
     in_hours, hours_reason = caps_mod.within_working_hours(account, now=now)
     if not in_hours:
         return hours_reason
@@ -192,16 +231,9 @@ def dispatch_for_account(
     if blocked:
         return DispatchDecision(account_id=account.id, dispatched=False, blocked_by=blocked)
 
-    task = _claim_next_task(db, account, now)
+    task, blocked_by = _claim_next_task(db, account, now)
     if task is None:
-        return DispatchDecision(account_id=account.id, dispatched=False, blocked_by="no due task")
-
-    # Quota is checked against the claimed task's action type, since caps differ
-    # per action. A blocked task stays PENDING and is retried after midnight
-    # local — no work is lost.
-    verdict = quota.check(db, account, task.action_type, now=now)
-    if not verdict.allowed:
-        return DispatchDecision(account_id=account.id, dispatched=False, blocked_by=verdict.reason)
+        return DispatchDecision(account_id=account.id, dispatched=False, blocked_by=blocked_by)
 
     task.status = TaskStatus.DISPATCHED
     task.dispatched_at = now

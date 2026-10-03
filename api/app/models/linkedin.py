@@ -115,6 +115,9 @@ class Proxy(UUIDPrimaryKey, Timestamps, Base):
     )
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_exit_ip: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    # Where the proxy was measured to exit (ISO-2), which can differ from the
+    # `country` its provider claimed. What LinkedIn actually sees.
+    exit_country: Mapped[str] = mapped_column(String(2), nullable=False, default="")
     notes: Mapped[str] = mapped_column(Text, nullable=False, default="")
 
     # Eager by default: presenting a proxy means reporting whether it is bound,
@@ -229,6 +232,23 @@ class LinkedInAccount(UUIDPrimaryKey, Timestamps, Base):
     # Log-normal pacing: the dispatcher will not touch this account until now.
     next_allowed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # ── feed cache ───────────────────────────────────────────────────────────
+    # A snapshot from the last manual refresh, not a live view: fetching the
+    # feed still costs the account's single execution slot and a real page
+    # load, so the UI reads this cache instead of hitting LinkedIn per click.
+    cached_feed: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
+    cached_feed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Opt-in: a background sweep likes a small random handful of cached posts
+    # a day (see `worker.tasks.auto_engage`) instead of waiting for someone to
+    # click Like. Off by default — this is a heuristic standing in for human
+    # judgement, which is strictly riskier than the real thing.
+    auto_like_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Which posts auto-like may pick: {"mode": "any" | "topics", "topics": [...],
+    # "exclude": [...], "use_ai": bool}. Read through like_rules.resolve().
+    auto_like_rules: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+
     @property
     def is_connected(self) -> bool:
         return self.session_ciphertext is not None
@@ -239,3 +259,34 @@ class LinkedInAccount(UUIDPrimaryKey, Timestamps, Base):
 
     def circuit_is_open(self, now: datetime) -> bool:
         return self.circuit_open_until is not None and self.circuit_open_until > now
+
+
+class AccountRiskEvent(UUIDPrimaryKey, Timestamps, Base):
+    """One warning against an account: a signal from LinkedIn, or a person
+    choosing a setting outside the safe policy. `strikes` is its weight toward
+    the automatic pause (see app.linkedin.risk); 0 means informational only."""
+
+    __tablename__ = "account_risk_events"
+    __table_args__ = (
+        Index("ix_account_risk_events_account_created", "linkedin_account_id", "created_at"),
+    )
+
+    linkedin_account_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("linkedin_accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    # "linkedin" (LinkedIn pushed back) | "override" (someone accepted a risk)
+    source: Mapped[str] = mapped_column(String(20), nullable=False)
+    kind: Mapped[str] = mapped_column(String(60), nullable=False)
+    strikes: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    detail: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
+    # An admin can clear a warning after reviewing it; cleared ones stop counting.
+    cleared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cleared_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )

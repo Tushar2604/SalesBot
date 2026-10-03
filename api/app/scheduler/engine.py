@@ -225,11 +225,12 @@ def materialize(
         # Already materialised — a previous tick got here first.
         return MaterializeResult(task=existing, advanced=False, note="already materialised")
 
-    # "smart" spreads the action to a human-like moment inside working hours.
-    # Any other mode means the user chose the timing, so run it when it is due;
-    # the dispatcher still applies working hours, daily limits and action spacing.
+    # "smart" runs it shortly, inside working hours (or in the next window).
+    # Any other mode means the user chose the timing, so run it when it is due.
+    # Either way the dispatcher still applies working hours, daily limits and
+    # the random per-account gap, which is what actually paces the pipeline.
     if step_timing(step) == "smart":
-        scheduled_at = pacing.schedule_within_working_hours(account, now)
+        scheduled_at = pacing.schedule_soon(account, now)
     else:
         scheduled_at = now
 

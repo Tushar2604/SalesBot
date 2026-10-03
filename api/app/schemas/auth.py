@@ -50,6 +50,8 @@ class UserResponse(BaseModel):
     full_name: str
     timezone: str
     is_active: bool
+    # Platform operator: sees the admin panel for every workspace's accounts.
+    is_superuser: bool = False
     created_at: datetime
 
 
@@ -60,6 +62,8 @@ class WorkspaceResponse(BaseModel):
     name: str
     slug: str
     outreach_paused: bool
+    # Testing mode: the same people may be contacted again. Off for real outreach.
+    allow_recontact: bool = False
     created_at: datetime
 
 
@@ -80,6 +84,8 @@ class WorkspaceCreateRequest(BaseModel):
 class WorkspaceUpdateRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=160)
     outreach_paused: bool | None = None
+    allow_recontact: bool | None = None
+    acknowledge_risk: bool = False
 
 
 class MemberResponse(BaseModel):

@@ -206,7 +206,7 @@ def test_poll_replies_persists_and_stops_sequence(monkeypatch, sdb: Session) -> 
     sdb.commit()
 
     class FakeDriver:
-        def list_conversations(self, limit: int = 20):
+        def list_conversations(self, limit: int = 20, known=None):
             return Classification(ResponseClass.OK), [
                 snapshot(participant_urn="urn:li:fsd_profile:lead1")
             ]

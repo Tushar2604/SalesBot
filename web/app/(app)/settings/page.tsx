@@ -3,8 +3,8 @@
 /**
  * Workspace Settings — tabbed like the reference product. Tabs that map onto
  * real backend fields (Daily Limit's core three, Schedule, Safe Mode's main
- * toggle, Blocklisting) are wired to the API. Tabs with no backend model yet
- * (AI Personalization, AI Config SOPs, Reports, Email Enrichment,
+ * toggle, Blocklisting, AI Config SOPs) are wired to the API. Tabs with no backend model yet
+ * (AI Personalization, Reports, Email Enrichment,
  * De-duplication, Manage Tags, Calendly, Pending Invites limiter) persist to
  * `useLocalState` so the screen is fully interactive and keeps its values,
  * without pretending a third-party integration exists.
@@ -12,10 +12,13 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, linkedinApi, type LinkedInAccount } from "@/lib/api";
+import { useRiskGuard } from "@/components/RiskGuard";
 import { leadsApi, type BlocklistEntry, type BlocklistKind } from "@/lib/outreach-api";
 import { useSession } from "@/lib/session";
 import { useLocalState } from "@/lib/localSettings";
 import { TabBar } from "@/components/app/TabBar";
+import { LinkedInFeedPanel } from "@/components/LinkedInFeedPanel";
+import { SopManager } from "@/components/assistant/SopManager";
 import { Toggle, ToggleRow } from "@/components/ui/Toggle";
 import {
   IconCalendar,
@@ -27,6 +30,7 @@ import {
 
 const TABS = [
   { key: "daily-limit", label: "Daily Limit" },
+  { key: "feed", label: "Feed" },
   { key: "safe-mode", label: "Safe Mode" },
   { key: "schedule", label: "Schedule" },
   { key: "ai-personalization", label: "AI Personalization" },
@@ -128,13 +132,16 @@ export default function SettingsPage() {
 
   const account = accounts.find((a) => a.id === accountId) ?? null;
 
+  const { guarded } = useRiskGuard();
+
   async function patchAccount(patch: Parameters<typeof linkedinApi.update>[2]) {
     if (!workspaceId || !accountId) return;
     setBusy(true);
     setError(null);
     try {
-      const updated = await linkedinApi.update(workspaceId, accountId, patch);
-      setAccounts((prev) => prev.map((a) => (a.id === accountId ? updated : a)));
+      const updated = await guarded((ack) => linkedinApi.update(workspaceId, accountId, patch, ack));
+      if (updated) setAccounts((prev) => prev.map((a) => (a.id === accountId ? updated : a)));
+      else await load(); // kept safe: put the form back to the saved values
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not save that change");
     } finally {
@@ -148,7 +155,6 @@ export default function SettingsPage() {
     videoMessages: 50,
     inmail: 50,
     profileFollows: 50,
-    postLikes: 50,
     withdrawInvites: 10,
     inviteToEvent: 30,
   });
@@ -241,6 +247,14 @@ export default function SettingsPage() {
                   onChange={(v) => void patchAccount({ daily_views: v })}
                 />
                 <Slider
+                  label="Post Likes"
+                  hint="Likes queued from the account's own feed (see the Feed tab)."
+                  value={account.caps.daily_likes}
+                  max={60}
+                  disabled={busy}
+                  onChange={(v) => void patchAccount({ daily_likes: v })}
+                />
+                <Slider
                   label="Voice Messages"
                   hint="Not yet enforced by the safety engine — tracked locally."
                   value={extraLimits.voiceMessages}
@@ -273,6 +287,14 @@ export default function SettingsPage() {
                 />
               </div>
             </div>
+          )}
+
+          {tab === "feed" && workspaceId && account && (
+            <LinkedInFeedPanel
+              workspaceId={workspaceId}
+              account={account}
+              onAutoLikeChange={(enabled) => patchAccount({ auto_like_enabled: enabled })}
+            />
           )}
 
           {tab === "safe-mode" && account && (
@@ -434,12 +456,17 @@ export default function SettingsPage() {
             </div>
           )}
 
-          {tab === "ai-config" && (
-            <StubTab
-              icon={IconSparkle}
-              title="AI Inbox Manager SOP Configuration"
-              description="Generating AI-powered inbox replies needs an LLM SOP pipeline connected to the inbox service. Configure it from Admin Settings → AI Config once that pipeline exists."
-            />
+          {tab === "ai-config" && workspace && (
+            <div>
+              <h2 className="mb-1 flex items-center gap-2 font-medium text-ink-950">
+                <IconSparkle className="h-4 w-4 text-violet-600" /> AI Inbox Manager SOP Configuration
+              </h2>
+              <p className="mb-4 text-sm text-slate-500">
+                Attach SOPs to your LinkedIn accounts. AI drafts in a conversation answer from the SOPs of
+                that conversation&apos;s account, plus any left on &ldquo;All accounts&rdquo;.
+              </p>
+              <SopManager workspaceId={workspace.id} />
+            </div>
           )}
 
           {tab === "reports" && (

@@ -9,6 +9,7 @@ visible would find nothing.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from typing import Annotated
 from urllib.parse import urlencode
 
@@ -23,15 +24,23 @@ from app.core.crypto import encrypt_str
 from app.core.errors import ConflictError, NotFoundError, ValidationFailedError
 from app.db import get_db
 from app.deps import Workspace_
-from app.linkedin import publishing
-from app.models.linkedin import LinkedInAccount, LinkedInAccountStatus, Proxy
+from app.linkedin import like_rules, publishing, risk
+from app.linkedin import proxy as proxy_mod
+from app.models.linkedin import LinkedInAccount, LinkedInAccountStatus, Proxy, ProxyStatus
 from app.models.tenancy import WorkspaceRole
 from app.schemas.linkedin import (
+    AutoLikePreview,
+    AutoLikePreviewPost,
+    AutoLikeRules,
+    AutoLikeRulesResponse,
     CapsUpdateRequest,
     ChallengeSubmitRequest,
     ConnectResponse,
     CookieConnectRequest,
     CredentialsConnectRequest,
+    FeedResponse,
+    LikePostRequest,
+    LikeTaskResponse,
     LinkedInAccountResponse,
     ProxyCreateRequest,
     ProxyResponse,
@@ -50,6 +59,12 @@ def _respond(account: LinkedInAccount) -> ConnectResponse:
     )
 
 
+async def _with_strikes(db: AsyncSession, account: LinkedInAccount) -> LinkedInAccountResponse:
+    await db.flush()
+    strikes = (await risk.strikes_by_account(db, [account.id])).get(account.id, 0)
+    return linkedin_service.to_response(account, strikes=strikes)
+
+
 # ── accounts ─────────────────────────────────────────────────────────────────
 
 
@@ -58,7 +73,8 @@ async def list_accounts(
     ctx: Workspace_, db: Annotated[AsyncSession, Depends(get_db)]
 ) -> list[LinkedInAccountResponse]:
     accounts = await linkedin_service.list_accounts(db, ctx.workspace_id)
-    return [linkedin_service.to_response(a) for a in accounts]
+    strikes = await risk.strikes_by_account(db, [a.id for a in accounts])
+    return [linkedin_service.to_response(a, strikes=strikes.get(a.id, 0)) for a in accounts]
 
 
 @router.get("/linkedin-accounts/{account_id}", response_model=LinkedInAccountResponse)
@@ -66,7 +82,7 @@ async def get_account(
     account_id: uuid.UUID, ctx: Workspace_, db: Annotated[AsyncSession, Depends(get_db)]
 ) -> LinkedInAccountResponse:
     account = await linkedin_service.get_account(db, ctx.workspace_id, account_id)
-    return linkedin_service.to_response(account)
+    return await _with_strikes(db, account)
 
 
 @router.post(
@@ -188,7 +204,7 @@ async def update_account(
     ctx.require_role(WorkspaceRole.ADMIN)
     account = await linkedin_service.get_account(db, ctx.workspace_id, account_id)
     account = await linkedin_service.update_caps(db, ctx, account, payload)
-    return linkedin_service.to_response(account)
+    return await _with_strikes(db, account)
 
 
 @router.post("/linkedin-accounts/{account_id}/pause", response_model=LinkedInAccountResponse)
@@ -197,11 +213,14 @@ async def pause_account(
     ctx: Workspace_,
     db: Annotated[AsyncSession, Depends(get_db)],
     paused: bool = True,
+    acknowledge_risk: bool = False,
 ) -> LinkedInAccountResponse:
     ctx.require_role(WorkspaceRole.ADMIN)
     account = await linkedin_service.get_account(db, ctx.workspace_id, account_id)
-    account = await linkedin_service.set_paused(db, ctx, account, paused)
-    return linkedin_service.to_response(account)
+    account = await linkedin_service.set_paused(
+        db, ctx, account, paused, acknowledge_risk=acknowledge_risk
+    )
+    return await _with_strikes(db, account)
 
 
 @router.post("/linkedin-accounts/{account_id}/disconnect", response_model=LinkedInAccountResponse)
@@ -221,6 +240,144 @@ async def delete_account(
     ctx.require_role(WorkspaceRole.ADMIN)
     account = await linkedin_service.get_account(db, ctx.workspace_id, account_id)
     await linkedin_service.delete_account(db, ctx, account)
+
+
+# ── feed ─────────────────────────────────────────────────────────────────────
+#
+# Viewing and liking posts through our own UI, without a browser tab open on
+# linkedin.com. Reading still costs the account's one execution slot and a
+# real page load, so it happens in a worker (see `worker.tasks.feed`) and this
+# just returns the last cached snapshot plus whether a refresh is in flight.
+# Liking queues an `ActionTask`, which is throttled, paced and circuit-broken
+# exactly like an invite or a message — see `linkedin_service.queue_like`.
+
+
+@router.get("/linkedin-accounts/{account_id}/feed", response_model=FeedResponse)
+async def get_feed(
+    account_id: uuid.UUID, ctx: Workspace_, db: Annotated[AsyncSession, Depends(get_db)]
+) -> FeedResponse:
+    account = await linkedin_service.get_account(db, ctx.workspace_id, account_id)
+    return await linkedin_service.to_feed_response(db, account)
+
+
+@router.post(
+    "/linkedin-accounts/{account_id}/feed/refresh",
+    response_model=FeedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def refresh_feed(
+    account_id: uuid.UUID, ctx: Workspace_, db: Annotated[AsyncSession, Depends(get_db)]
+) -> FeedResponse:
+    """Queues a feed read. Returns the cache as it stands now; poll `GET .../feed`."""
+    account = await linkedin_service.get_account(db, ctx.workspace_id, account_id)
+    if not account.is_connected or account.status is not LinkedInAccountStatus.ACTIVE:
+        raise ConflictError("this account is not active, so its feed cannot be read")
+
+    celery_app.send_task(
+        "linkedin.action.refresh_feed", args=[str(account.id)], queue="linkedin.action"
+    )
+    response = await linkedin_service.to_feed_response(db, account)
+    response.refreshing = True
+    return response
+
+
+@router.post("/linkedin-accounts/{account_id}/feed/like", response_model=LikeTaskResponse)
+async def like_post(
+    account_id: uuid.UUID,
+    payload: LikePostRequest,
+    ctx: Workspace_,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> LikeTaskResponse:
+    account = await linkedin_service.get_account(db, ctx.workspace_id, account_id)
+    result = await linkedin_service.queue_like(db, ctx, account, payload.post_urn)
+    await db.commit()
+    return result
+
+
+# ── auto-like topic rules ────────────────────────────────────────────────────
+
+
+def _rules_response(account: LinkedInAccount) -> AutoLikeRulesResponse:
+    from app.ai import assistant as ai
+
+    rules = like_rules.resolve(account.auto_like_rules)
+    return AutoLikeRulesResponse(
+        **rules.to_dict(),
+        auto_like_enabled=account.auto_like_enabled,
+        ai_available=bool(ai.available_providers()),
+        suggested_topics=like_rules.SUGGESTED_TOPICS,
+        suggested_excludes=like_rules.SUGGESTED_EXCLUDES,
+    )
+
+
+@router.get("/linkedin-accounts/{account_id}/auto-like-rules", response_model=AutoLikeRulesResponse)
+async def get_auto_like_rules(
+    account_id: uuid.UUID, ctx: Workspace_, db: Annotated[AsyncSession, Depends(get_db)]
+) -> AutoLikeRulesResponse:
+    return _rules_response(await linkedin_service.get_account(db, ctx.workspace_id, account_id))
+
+
+@router.put("/linkedin-accounts/{account_id}/auto-like-rules", response_model=AutoLikeRulesResponse)
+async def put_auto_like_rules(
+    account_id: uuid.UUID,
+    payload: AutoLikeRules,
+    ctx: Workspace_,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AutoLikeRulesResponse:
+    """Which posts auto-like may pick for this account."""
+    ctx.require_role(WorkspaceRole.MEMBER)
+    account = await linkedin_service.get_account(db, ctx.workspace_id, account_id)
+    if payload.mode == "topics" and not like_rules.resolve(payload.model_dump()).topics:
+        raise ValidationFailedError("add at least one topic, or choose to like any post")
+    rules = like_rules.resolve(payload.model_dump())
+    account.auto_like_rules = rules.to_dict()
+    await audit.record(
+        db,
+        "linkedin_account.auto_like_rules_updated",
+        workspace_id=ctx.workspace_id,
+        actor_user_id=ctx.user.id,
+        target_type="linkedin_account",
+        target_id=account.id,
+        metadata=rules.to_dict(),
+    )
+    await db.commit()
+    await db.refresh(account)
+    return _rules_response(account)
+
+
+@router.post(
+    "/linkedin-accounts/{account_id}/auto-like-rules/preview", response_model=AutoLikePreview
+)
+async def preview_auto_like_rules(
+    account_id: uuid.UUID,
+    payload: AutoLikeRules,
+    ctx: Workspace_,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AutoLikePreview:
+    """What these rules (saved or not) would do with the posts in the feed
+    cache right now. Reads nothing from LinkedIn and likes nothing."""
+    account = await linkedin_service.get_account(db, ctx.workspace_id, account_id)
+    rules = like_rules.resolve(payload.model_dump())
+    feed = [dict(p) for p in account.cached_feed or []]
+    verdicts = await anyio.to_thread.run_sync(like_rules.judge, feed, rules)
+    posts = [
+        AutoLikePreviewPost(
+            urn=str(post.get("urn") or ""),
+            author_name=str(post.get("author_name") or ""),
+            text=str(post.get("text") or "")[:400],
+            liked=bool(post.get("liked")),
+            would_like=verdict.like,
+            topic=verdict.topic,
+            reason=verdict.reason,
+            matched_by=verdict.by,
+        )
+        for post, verdict in zip(feed, verdicts, strict=True)
+    ]
+    return AutoLikePreview(
+        rules=AutoLikeRules(**rules.to_dict()),
+        posts=posts,
+        matching=sum(1 for p in posts if p.would_like),
+    )
 
 
 # ── proxies ──────────────────────────────────────────────────────────────────
@@ -246,6 +403,7 @@ async def list_proxies(
             city=p.city,
             status=p.status,
             last_exit_ip=p.last_exit_ip,
+            exit_country=p.exit_country,
             last_checked_at=p.last_checked_at,
             assigned_account_id=p.assigned_account_id,
             created_at=p.created_at,
@@ -282,6 +440,43 @@ async def create_proxy(
         # when the response reports `assigned_account_id`.
         assigned_account=None,
     )
+
+    # Measure where it really exits before anyone can sign in through it.
+    resolved = proxy_mod.resolve(proxy)
+    assert resolved is not None
+    probe = await proxy_mod.probe_exit(resolved.url)
+    if not probe.ok:
+        raise ValidationFailedError(
+            "Could not connect through this proxy. Check the scheme (most providers use "
+            "http, not https), host, port, username and password."
+        )
+    risks: list[risk.Risk] = []
+    if payload.country and probe.country and probe.country != payload.country:
+        risks.append(
+            risk.Risk(
+                "proxy_country_mismatch",
+                f"This proxy is labelled {payload.country} but exits in "
+                f"{probe.city + ', ' if probe.city else ''}{probe.country}",
+                "LinkedIn sees the exit location. An account that appears in a different "
+                "country from its owner, or from where it usually is, is one of the "
+                "strongest ban signals. Ask your provider for an exit in the right country.",
+            )
+        )
+    if probe.looks_like_datacenter:
+        risks.append(
+            risk.Risk(
+                "proxy_datacenter",
+                f"This proxy exits from a hosting network ({probe.org})",
+                "Data-centre IPs are not where people browse from, and LinkedIn scores them "
+                "poorly. Use a residential or mobile proxy.",
+            )
+        )
+    risk.require_acknowledgement(risks, payload.acknowledge_risk)
+    proxy.last_exit_ip = probe.ip
+    proxy.exit_country = probe.country
+    proxy.last_checked_at = datetime.now(UTC)
+    proxy.status = ProxyStatus.HEALTHY
+
     db.add(proxy)
     await db.flush()
 
@@ -304,6 +499,7 @@ async def create_proxy(
         city=proxy.city,
         status=proxy.status,
         last_exit_ip=proxy.last_exit_ip,
+        exit_country=proxy.exit_country,
         last_checked_at=proxy.last_checked_at,
         assigned_account_id=proxy.assigned_account_id,
         created_at=proxy.created_at,
@@ -366,9 +562,7 @@ async def start_publishing_authorization(
     return PublishingAuthorizeResponse(authorize_url=publishing.authorize_url(state))
 
 
-@router.delete(
-    "/linkedin-accounts/{account_id}/publishing", response_model=LinkedInAccountResponse
-)
+@router.delete("/linkedin-accounts/{account_id}/publishing", response_model=LinkedInAccountResponse)
 async def revoke_publishing_authorization(
     account_id: uuid.UUID, ctx: Workspace_, db: Annotated[AsyncSession, Depends(get_db)]
 ) -> LinkedInAccountResponse:

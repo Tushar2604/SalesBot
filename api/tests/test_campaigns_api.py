@@ -214,17 +214,29 @@ async def test_a_sound_sequence_is_accepted(client: AsyncClient, db: Any) -> Non
     assert any("Enroll" in blocker for blocker in campaign["launch_blockers"])
 
 
-async def test_step_timing_round_trips_and_is_validated(client: AsyncClient, db: Any) -> None:
+async def test_step_timing_asap_and_short_waits_are_rejected(client: AsyncClient, db: Any) -> None:
+    """ASAP and sub-30-minute waits are a hard floor, not a warn-and-override:
+    a person accepting the risk is exactly how this got used in production."""
     token, ws, account_id = await setup_workspace(client, db)
     url = f"/api/v1/workspaces/{ws}/campaigns"
 
-    good = await client.post(
+    asap_rejected = await client.post(
+        url,
+        json={
+            "name": "Timed",
+            "linkedin_account_id": account_id,
+            "steps": [step("view_profile", timing="asap")],
+        },
+        headers=auth(token),
+    )
+    assert asap_rejected.status_code == 422, asap_rejected.text
+
+    short_wait_rejected = await client.post(
         url,
         json={
             "name": "Timed",
             "linkedin_account_id": account_id,
             "steps": [
-                step("view_profile", timing="asap"),
                 step("invite", timing="at", send_at="2030-01-02T09:30:00+00:00", template="Hi"),
                 step(
                     "message",
@@ -237,11 +249,39 @@ async def test_step_timing_round_trips_and_is_validated(client: AsyncClient, db:
         },
         headers=auth(token),
     )
+    assert short_wait_rejected.status_code == 422, short_wait_rejected.text
+    # There is no acknowledge_risk escape hatch for this one, unlike other risky settings.
+    assert "acknowledge_risk" not in short_wait_rejected.text
+
+
+async def test_step_timing_round_trips_and_is_validated(client: AsyncClient, db: Any) -> None:
+    token, ws, account_id = await setup_workspace(client, db)
+    url = f"/api/v1/workspaces/{ws}/campaigns"
+
+    good = await client.post(
+        url,
+        json={
+            "name": "Timed",
+            "linkedin_account_id": account_id,
+            "steps": [
+                step("view_profile", timing="smart"),
+                step("invite", timing="at", send_at="2030-01-02T09:30:00+00:00", template="Hi"),
+                step(
+                    "message",
+                    timing="delay",
+                    delay_minutes=45,
+                    only_if="if_accepted",
+                    template="Thanks",
+                ),
+            ],
+        },
+        headers=auth(token),
+    )
     assert good.status_code == 201, good.text
     steps = good.json()["steps"]
-    assert [s["timing"] for s in steps] == ["asap", "at", "delay"]
+    assert [s["timing"] for s in steps] == ["smart", "at", "delay"]
     assert steps[1]["send_at"].startswith("2030-01-02T09:30:00")
-    assert steps[2]["delay_minutes"] == 10
+    assert steps[2]["delay_minutes"] == 45
 
     missing_time = await client.post(
         url,
@@ -352,6 +392,69 @@ async def test_an_already_contacted_lead_is_not_enrolled(client: AsyncClient, db
 
     assert enrolled.json()["enrolled"] == 2
     assert enrolled.json()["skipped_duplicate"] == 1
+
+
+async def enable_recontact(client: AsyncClient, token: str, ws: str) -> None:
+    url = f"/api/v1/workspaces/{ws}"
+    refused = await client.patch(url, json={"allow_recontact": True}, headers=auth(token))
+    assert refused.status_code == 409  # a confirmation, shown as the ban-risk pop-up
+    accepted = await client.patch(
+        url, json={"allow_recontact": True, "acknowledge_risk": True}, headers=auth(token)
+    )
+    assert accepted.json()["allow_recontact"] is True
+
+
+async def test_testing_mode_enrolls_an_already_contacted_lead(client: AsyncClient, db: Any) -> None:
+    token, ws, account_id = await setup_workspace(client, db)
+    campaign_id = await create_campaign(client, token, ws, account_id)
+    list_id = await import_leads(client, token, ws, count=3)
+
+    from app.models.leads import ContactedLead
+
+    db.add(ContactedLead(workspace_id=ws, public_id="lead-0-demo"))
+    await db.flush()
+    await enable_recontact(client, token, ws)
+
+    enrolled = await client.post(
+        f"/api/v1/workspaces/{ws}/campaigns/{campaign_id}/enroll",
+        json={"list_id": list_id},
+        headers=auth(token),
+    )
+    assert enrolled.json()["enrolled"] == 3
+    assert enrolled.json()["skipped_duplicate"] == 0
+
+
+async def test_testing_mode_reruns_a_finished_lead_but_not_a_running_one(
+    client: AsyncClient, db: Any
+) -> None:
+    from sqlalchemy import select, update
+
+    from app.models.campaigns import CampaignLead, EnrollmentState
+
+    token, ws, account_id = await setup_workspace(client, db)
+    campaign_id = await create_campaign(client, token, ws, account_id)
+    list_id = await import_leads(client, token, ws, count=2)
+    url = f"/api/v1/workspaces/{ws}/campaigns/{campaign_id}/enroll"
+    await client.post(url, json={"list_id": list_id}, headers=auth(token))
+
+    rows = (await db.execute(select(CampaignLead).order_by(CampaignLead.created_at))).scalars().all()
+    finished_id = rows[0].id
+    await db.execute(
+        update(CampaignLead)
+        .where(CampaignLead.id == finished_id)
+        .values(state=EnrollmentState.COMPLETED)
+    )
+    await db.flush()
+
+    # Normal mode: nobody is enrolled twice.
+    again = await client.post(url, json={"list_id": list_id}, headers=auth(token))
+    assert again.json()["skipped_already_enrolled"] == 2
+
+    await enable_recontact(client, token, ws)
+    again = await client.post(url, json={"list_id": list_id}, headers=auth(token))
+    assert again.json()["enrolled"] == 1  # the finished one starts over
+    assert again.json()["skipped_already_enrolled"] == 1  # the running one is left alone
+    assert await db.get(CampaignLead, finished_id) is None
 
 
 async def test_the_sequence_cannot_be_edited_while_running(client: AsyncClient, db: Any) -> None:

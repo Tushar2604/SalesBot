@@ -86,7 +86,7 @@ const SECTIONS: Section[] = [
     rules: [
       {
         title: "Leave the timing on “Smart”",
-        body: "Smart picks a natural moment inside working hours. Use ASAP or a fixed time only when you need it, for a test or a launch date; the limits still apply.",
+        body: "Smart picks a natural moment inside working hours. “After a wait” (30 min minimum) or a fixed time are there for a launch date; the limits still apply.",
         where: { label: "Campaign → sequence → When to send", href: "/campaigns" },
       },
       {

@@ -40,6 +40,10 @@ def default_caps() -> dict[str, Any]:
         else 20,
         "daily_messages": 20,
         "daily_views": 30,
+        # A like is a write, visible to the prospect's network — nowhere near
+        # as sensitive as an invite, but still throttled rather than left open
+        # like the read-only actions above.
+        "daily_likes": 25,
         "weekly_invites": settings.safety_max_weekly_invites,
         "working_hours": dict(DEFAULT_WORKING_HOURS),
         "weekdays_only": True,
@@ -55,6 +59,23 @@ def warmup_invites(account: LinkedInAccount, *, now: datetime) -> int:
     low = settings.safety_test_mode_daily_invites
     high = max(low, settings.safety_test_mode_daily_invites_max)
     digest = hashlib.sha256(f"{account.id}:{now.date().isoformat()}".encode()).digest()
+    return low + digest[0] % (high - low + 1)
+
+
+# A person skimming their feed likes a handful of things, not a fixed
+# quota — this is the range the autonomous sweep draws from.
+AUTO_LIKE_DAILY_RANGE: tuple[int, int] = (2, 5)
+
+
+def auto_like_daily_target(account: LinkedInAccount, *, now: datetime) -> int:
+    """How many autonomous likes to aim for today.
+
+    Deterministic per account per day (hash, not random) for the same reason
+    `warmup_invites` is: every sweep tick that day must agree on the target,
+    or the count would drift depending on how many ticks happened to run.
+    """
+    low, high = AUTO_LIKE_DAILY_RANGE
+    digest = hashlib.sha256(f"auto_like:{account.id}:{now.date().isoformat()}".encode()).digest()
     return low + digest[0] % (high - low + 1)
 
 
@@ -78,6 +99,7 @@ class EffectiveCaps:
     daily_invites: int
     daily_messages: int
     daily_views: int
+    daily_likes: int
     weekly_invites: int
     working_hours: tuple[time, time]
     weekdays_only: bool
@@ -118,11 +140,16 @@ def resolve(account: LinkedInAccount, *, now: datetime | None = None) -> Effecti
     if account.test_mode:
         daily_messages = min(daily_messages, settings.safety_test_mode_daily_messages)
 
+    daily_likes = min(int(stored.get("daily_likes", 25)), 60)
+    if account.test_mode:
+        daily_likes = min(daily_likes, 10)
+
     hours = stored.get("working_hours") or DEFAULT_WORKING_HOURS
     return EffectiveCaps(
         daily_invites=daily_invites,
         daily_messages=daily_messages,
         daily_views=min(int(stored.get("daily_views", 30)), 150),
+        daily_likes=daily_likes,
         weekly_invites=min(
             int(stored.get("weekly_invites", settings.safety_max_weekly_invites)),
             settings.safety_max_weekly_invites,
@@ -163,6 +190,26 @@ def within_working_hours(
             f"({local:%H:%M} local in {caps.timezone})"
         )
     return True, ""
+
+
+# Outside working hours a person still glances at LinkedIn now and then, but
+# nobody opens it every ten minutes through the night.
+AWAKE_START = time(7, 0)
+AWAKE_END = time(23, 0)
+
+
+def background_cadence(account: LinkedInAccount, *, now: datetime | None = None) -> str:
+    """How much background reading (inbox, acceptance checks) this account may do now.
+
+    "active"  working hours: normal polling
+    "light"   awake but off-hours (evenings, weekends): an occasional inbox look
+    "asleep"  night in the account's own timezone: nothing at all
+    """
+    now = now or datetime.now(UTC)
+    if within_working_hours(account, now=now)[0]:
+        return "active"
+    local = now.astimezone(zone_for(account)).time()
+    return "light" if AWAKE_START <= local < AWAKE_END else "asleep"
 
 
 def week_window(now: datetime | None = None) -> tuple[date, date]:

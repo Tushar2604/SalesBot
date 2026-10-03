@@ -7,8 +7,10 @@ changing callers.
 
 from __future__ import annotations
 
+from typing import cast
+
 from app.config import settings
-from app.linkedin import fingerprint, health, proxy, session_store
+from app.linkedin import fingerprint, guard, health, proxy, session_store
 from app.linkedin.browser_driver import BrowserDriver
 from app.linkedin.classify import Classification, ResponseClass, classify_response
 from app.linkedin.driver import (
@@ -16,6 +18,7 @@ from app.linkedin.driver import (
     AuthResult,
     ChallengeContext,
     ConversationSnapshot,
+    FeedPost,
     LinkedInDriver,
     ProfileSnapshot,
     SearchPage,
@@ -36,22 +39,30 @@ def build_driver(
     Binds together the three pieces that must always travel together: the
     frozen fingerprint, the assigned proxy, and the stored session. Building
     them separately at a call site is how they drift apart.
+
+    The driver comes wrapped in the action gap guard: every write it makes
+    waits out the account's human-like gap, whoever the caller is (see
+    app/linkedin/guard.py). This is the only place a driver is constructed.
     """
     resolved = proxy.resolve(account.proxy)
+    inner: LinkedInDriver
     if settings.linkedin_driver == "browser":
-        return BrowserDriver(
+        inner = BrowserDriver(
             fingerprint=account.fingerprint or {},
             proxy_url=resolved.url if resolved else None,
             session=session_store.load_session(account) if with_session else None,
             timeout=timeout,
             timezone=account.timezone or "UTC",
+            profile_account_id=account.id,
         )
-    return MobileVoyagerDriver(
-        fingerprint=account.fingerprint or fingerprint.generate(timezone=account.timezone),
-        proxy_url=resolved.url if resolved else None,
-        session=session_store.load_session(account) if with_session else None,
-        timeout=timeout,
-    )
+    else:
+        inner = MobileVoyagerDriver(
+            fingerprint=account.fingerprint or fingerprint.generate(timezone=account.timezone),
+            proxy_url=resolved.url if resolved else None,
+            session=session_store.load_session(account) if with_session else None,
+            timeout=timeout,
+        )
+    return cast(LinkedInDriver, guard.GuardedDriver(inner, account))
 
 
 __all__ = [
@@ -61,6 +72,7 @@ __all__ = [
     "ChallengeContext",
     "Classification",
     "ConversationSnapshot",
+    "FeedPost",
     "LinkedInDriver",
     "MobileVoyagerDriver",
     "ProfileSnapshot",
@@ -70,6 +82,7 @@ __all__ = [
     "build_driver",
     "classify_response",
     "fingerprint",
+    "guard",
     "health",
     "proxy",
     "session_store",

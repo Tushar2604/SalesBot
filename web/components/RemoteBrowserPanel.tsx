@@ -35,6 +35,15 @@ export function RemoteBrowserPanel({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const socketRef = useRef<RemoteBrowserSocket | null>(null);
   const naturalSizeRef = useRef<{ width: number; height: number } | null>(null);
+  // start() creates a new LinkedIn account row and claims a proxy — not
+  // idempotent. React Strict Mode's dev-only mount→cleanup→mount would
+  // otherwise fire it twice per dialog open, racing two account creations
+  // for the same proxy (one fails loudly, the other leaves an orphaned
+  // "connecting" account).
+  const startedRef = useRef(false);
+  // Retry reuses the row the first attempt created; a fresh row per retry
+  // would try to claim the same proxy again and be refused.
+  const accountIdRef = useRef<string | null>(null);
 
   const [phase, setPhase] = useState<Phase>("starting");
   const [detail, setDetail] = useState("Starting a browser session…");
@@ -42,13 +51,18 @@ export function RemoteBrowserPanel({
   const start = useCallback(async () => {
     setPhase("starting");
     setDetail("Starting a browser session…");
+    socketRef.current?.close();
+    socketRef.current = null;
     try {
-      const account = await linkedinApi.createRemoteAccount(workspaceId, {
-        label,
-        timezone,
-        proxy_id: proxyId || null,
-      });
-      const { ws_url } = await linkedinApi.startRemoteSession(workspaceId, account.id);
+      if (!accountIdRef.current) {
+        const account = await linkedinApi.createRemoteAccount(workspaceId, {
+          label,
+          timezone,
+          proxy_id: proxyId || null,
+        });
+        accountIdRef.current = account.id;
+      }
+      const { ws_url } = await linkedinApi.startRemoteSession(workspaceId, accountIdRef.current);
 
       const socket = new RemoteBrowserSocket(ws_url, {
         onFrame: (blob) => void drawFrame(blob),
@@ -76,7 +90,12 @@ export function RemoteBrowserPanel({
   }, [workspaceId, label, timezone, proxyId]);
 
   useEffect(() => {
-    void start();
+    if (!startedRef.current) {
+      startedRef.current = true;
+      void start();
+    }
+    // Always return the cleanup, even on Strict Mode's second pass, so a real
+    // unmount still closes the socket (and with it the server-side Chromium).
     return () => socketRef.current?.close();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -139,24 +158,45 @@ export function RemoteBrowserPanel({
     const { x, y } = toRemoteCoords(e);
     socketRef.current?.sendMouse({ event: "wheel", x, y, deltaY: e.deltaY });
   }
+  function modifiers(e: React.KeyboardEvent): number {
+    // CDP bitmask: Alt=1, Ctrl=2, Meta=4, Shift=8.
+    return (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
+  }
+  function isPasteShortcut(e: React.KeyboardEvent): boolean {
+    return (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "v";
+  }
+  function keyText(e: React.KeyboardEvent): string {
+    if (e.ctrlKey || e.metaKey || e.altKey) return "";
+    if (e.key === "Enter") return "\r";
+    return e.key.length === 1 ? e.key : "";
+  }
   function onKeyDown(e: React.KeyboardEvent<HTMLCanvasElement>) {
+    // Let the browser raise its own paste event; onPaste relays the text.
+    if (isPasteShortcut(e)) return;
     e.preventDefault();
     socketRef.current?.sendKey({
       event: "keydown",
       key: e.key,
       code: e.code,
       windowsVirtualKeyCode: e.keyCode,
-      text: e.key.length === 1 ? e.key : "",
+      text: keyText(e),
+      modifiers: modifiers(e),
     });
   }
   function onKeyUp(e: React.KeyboardEvent<HTMLCanvasElement>) {
+    if (isPasteShortcut(e)) return;
     e.preventDefault();
     socketRef.current?.sendKey({
       event: "keyup",
       key: e.key,
       code: e.code,
       windowsVirtualKeyCode: e.keyCode,
+      modifiers: modifiers(e),
     });
+  }
+  function onPaste(e: React.ClipboardEvent<HTMLCanvasElement>) {
+    e.preventDefault();
+    socketRef.current?.sendText(e.clipboardData.getData("text/plain"));
   }
 
   function close() {
@@ -202,9 +242,15 @@ export function RemoteBrowserPanel({
               onWheel={onWheel}
               onKeyDown={onKeyDown}
               onKeyUp={onKeyUp}
+              onPaste={onPaste}
             />
           )}
         </div>
+        {phase === "live" && (
+          <p className="border-t border-slate-200 px-5 pt-3 text-xs text-slate-500">
+            Click a field in the page above, then type. Ctrl+V / ⌘V pastes.
+          </p>
+        )}
 
         <div className="flex justify-end gap-3 border-t border-slate-200 px-5 py-4">
           {(phase === "closed" || phase === "error") && (

@@ -32,6 +32,7 @@ BUDGETED: dict[StepType, str] = {
     StepType.INVITE: "daily_invites",
     StepType.MESSAGE: "daily_messages",
     StepType.VIEW_PROFILE: "daily_views",
+    StepType.LIKE_POST: "daily_likes",
 }
 
 

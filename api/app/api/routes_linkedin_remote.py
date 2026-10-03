@@ -206,18 +206,12 @@ async def remote_session_ws(websocket: WebSocket, ticket: Annotated[str, Query()
             await session.dispatch_input(message)
 
     async def _writer() -> None:
-        while True:
-            frame_task = asyncio.ensure_future(session.next_frame())
-            status_task = asyncio.ensure_future(session.next_status())
-            done, pending = await asyncio.wait(
-                {frame_task, status_task}, return_when=asyncio.FIRST_COMPLETED
-            )
-            for task in pending:
-                task.cancel()
-            if frame_task in done:
-                await websocket.send_bytes(frame_task.result())
-            if status_task in done:
-                await websocket.send_json(status_task.result().model_dump())
+        while (items := await session.next_outgoing()) is not None:
+            for item in items:
+                if isinstance(item, bytes):
+                    await websocket.send_bytes(item)
+                else:
+                    await websocket.send_json(item.model_dump())
 
     reader_task = asyncio.ensure_future(_reader())
     writer_task = asyncio.ensure_future(_writer())

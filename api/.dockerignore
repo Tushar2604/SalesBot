@@ -8,3 +8,7 @@ __pycache__/
 htmlcov/
 tests/__pycache__/
 *.md
+# Screenshots of real LinkedIn pages: personal data, never in an image.
+debug_screens/
+.env
+.env.*

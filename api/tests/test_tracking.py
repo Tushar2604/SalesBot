@@ -291,3 +291,64 @@ def test_a_new_accounts_empty_inbox_is_recognised() -> None:
     assert BrowserDriver._inbox_is_empty(_FakePage("Messaging\nNo messages yet\nSend a message"))
     assert not BrowserDriver._inbox_is_empty(_FakePage("Messaging\nAna Lee  Hello there"))
     assert not BrowserDriver._inbox_is_empty(_FakePage(None))
+
+
+# ── acceptance from the inbox, and the wait after it ─────────────────────────
+
+
+def test_an_answer_in_the_thread_proves_the_invite_was_accepted() -> None:
+    from app.linkedin.driver import ConversationSnapshot, MessageEvent
+    from app.worker.tasks.sync import _accepted_from_thread
+
+    lead = enrollment(days_ago=0.1)
+    thread = ConversationSnapshot(
+        conversation_urn="t",
+        events=[MessageEvent(from_me=False, text="happy to connect")],
+    )
+    assert _accepted_from_thread(None, lead, thread) is True  # type: ignore[arg-type]
+
+    lead.connection_state = ConnectionState.CONNECTED.value
+    assert _accepted_from_thread(None, lead, thread) is False  # type: ignore[arg-type]
+
+
+def test_the_invite_note_in_the_thread_proves_acceptance() -> None:
+    from app.linkedin.driver import ConversationSnapshot, MessageEvent
+    from app.worker.tasks.sync import _accepted_from_thread
+
+    class _Notes:
+        def execute(self, *_: Any, **__: Any) -> Any:
+            return SimpleNamespace(scalars=lambda: ["Hi there,  good to connect."])
+
+    lead = enrollment(days_ago=0.1)
+    ours = ConversationSnapshot(
+        conversation_urn="t", events=[MessageEvent(from_me=True, text="Hi there, good to connect.")]
+    )
+    other = ConversationSnapshot(
+        conversation_urn="t", events=[MessageEvent(from_me=True, text="Something else")]
+    )
+    assert _accepted_from_thread(_Notes(), lead, ours) is True  # type: ignore[arg-type]
+    assert _accepted_from_thread(_Notes(), lead, other) is False  # type: ignore[arg-type]
+
+
+def test_a_step_gated_on_acceptance_waits_from_the_acceptance() -> None:
+    from app.models.campaigns import Campaign, CampaignStep, StepCondition, StepType
+
+    step = CampaignStep(
+        order_index=2,
+        step_type=StepType.MESSAGE,
+        only_if=StepCondition.IF_ACCEPTED,
+        delay_hours=0,
+        config={"timing": "delay", "delay_minutes": 12},
+    )
+    campaign = Campaign(steps=[CampaignStep(order_index=0), CampaignStep(order_index=1), step])
+
+    class _Db(_NoHistory):
+        def get(self, *_: Any) -> Any:
+            return campaign
+
+    lead = enrollment(days_ago=0.1)
+    lead.state = EnrollmentState.RUNNING
+    lead.current_step_index = 2
+    changed = _resolve_invite(_Db(), lead, ConnectionStatus.CONNECTED, NOW)  # type: ignore[arg-type]
+    assert changed == "accepted"
+    assert lead.next_run_at == NOW + timedelta(minutes=12)

@@ -78,6 +78,7 @@ export class RemoteBrowserSocket {
     code: string;
     windowsVirtualKeyCode?: number;
     text?: string;
+    modifiers?: number;
   }): void {
     this.send({
       type: "key",
@@ -86,7 +87,13 @@ export class RemoteBrowserSocket {
       code: input.code,
       windows_virtual_key_code: input.windowsVirtualKeyCode ?? 0,
       text: input.text ?? "",
+      modifiers: input.modifiers ?? 0,
     });
+  }
+
+  sendText(text: string): void {
+    if (!text) return;
+    this.send({ type: "text", text: text.slice(0, 2000) });
   }
 
   close(): void {

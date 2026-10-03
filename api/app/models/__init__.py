@@ -4,7 +4,7 @@ Every model module must be imported here so Alembic autogenerate and
 `Base.metadata` see the full schema.
 """
 
-from app.models.assistant import KnowledgeItem
+from app.models.assistant import AssistantProfile, KnowledgeItem
 from app.models.base import Base
 from app.models.campaigns import (
     ActionTask,
@@ -37,6 +37,8 @@ from app.models.inbox import (
     Message,
     MessageDirection,
 )
+from app.models.integrations import ApiKey, DeliveryStatus, WebhookDelivery, WebhookEndpoint
+from app.models.lead_search import LeadSearch
 from app.models.leads import (
     BlocklistEntry,
     BlocklistKind,
@@ -46,7 +48,13 @@ from app.models.leads import (
     LeadList,
     LeadSource,
 )
-from app.models.linkedin import LinkedInAccount, LinkedInAccountStatus, Proxy, ProxyStatus
+from app.models.linkedin import (
+    AccountRiskEvent,
+    LinkedInAccount,
+    LinkedInAccountStatus,
+    Proxy,
+    ProxyStatus,
+)
 from app.models.tenancy import (
     AuditEvent,
     InviteStatus,
@@ -59,8 +67,10 @@ from app.models.tenancy import (
 )
 
 __all__ = [
-    "KnowledgeItem",
+    "AccountRiskEvent",
     "ActionTask",
+    "ApiKey",
+    "AssistantProfile",
     "AuditEvent",
     "Base",
     "BlocklistEntry",
@@ -75,12 +85,15 @@ __all__ = [
     "Conversation",
     "ConversationLabel",
     "DailyQuotaLedger",
+    "DeliveryStatus",
     "EnrollmentState",
     "ImportStatus",
     "InviteStatus",
+    "KnowledgeItem",
     "LabelSource",
     "Lead",
     "LeadList",
+    "LeadSearch",
     "LeadSource",
     "LinkedInAccount",
     "LinkedInAccountStatus",
@@ -101,6 +114,8 @@ __all__ = [
     "StepType",
     "TaskStatus",
     "User",
+    "WebhookDelivery",
+    "WebhookEndpoint",
     "Workspace",
     "WorkspaceInvite",
     "WorkspaceMember",

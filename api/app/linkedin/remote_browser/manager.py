@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import queue
 import threading
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -25,6 +25,7 @@ from app.config import settings
 from app.core import local_cache
 from app.core.logging import get_logger
 from app.db import AsyncSessionLocal
+from app.linkedin import browser_profile
 from app.linkedin import proxy as proxy_mod
 from app.linkedin.remote_browser import browser_fingerprint, stealth, xvfb
 from app.linkedin.remote_browser.cdp_relay import CdpRelay
@@ -33,7 +34,13 @@ from app.linkedin.remote_browser.playwright_pool import (
     run_on_playwright_loop,
     to_playwright_proxy,
 )
-from app.linkedin.remote_browser.protocol import KeyInput, MouseInput, StatusMessage, StatusState
+from app.linkedin.remote_browser.protocol import (
+    KeyInput,
+    MouseInput,
+    StatusMessage,
+    StatusState,
+    TextInput,
+)
 from app.models.linkedin import LinkedInAccount
 from app.scheduler.locks import slot_key
 from app.services.linkedin_service import seal_for_transit
@@ -134,6 +141,13 @@ async def _release_slot(account_id: uuid.UUID, token: str) -> None:
 
 @dataclass
 class RemoteBrowserSession:
+    """Frames and statuses are produced on the Playwright thread and consumed
+    by the WebSocket writer on the server loop. A lock-guarded outbox plus a
+    thread-safe wake-up keeps that hand-off lossless: blocking `queue.get()`
+    calls run via `to_thread` cannot be cancelled, so a losing race left a
+    thread behind that silently ate the next message and, one per frame,
+    exhausted the default executor until the screen froze."""
+
     account_id: uuid.UUID
     workspace_id: uuid.UUID
     browser: object
@@ -141,37 +155,53 @@ class RemoteBrowserSession:
     page: object
     relay: CdpRelay
     slot_token: str
-    frame_queue: queue.Queue[bytes] = field(default_factory=lambda: queue.Queue(maxsize=2))
-    status_queue: queue.Queue[StatusMessage] = field(default_factory=queue.Queue)
+    outbox_loop: asyncio.AbstractEventLoop
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     last_input_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     _tasks: list[asyncio.Task[None]] = field(default_factory=list)
     _closed: threading.Event = field(default_factory=threading.Event)
+    _outbox_lock: threading.Lock = field(default_factory=threading.Lock)
+    _statuses: deque[StatusMessage] = field(default_factory=deque)
+    # Only the newest frame matters: a slow consumer should jump to the current
+    # screen, not replay a backlog of stale ones.
+    _latest_frame: bytes | None = None
+    _wake: asyncio.Event = field(default_factory=asyncio.Event)
 
     def touch(self) -> None:
         self.last_input_at = datetime.now(UTC)
 
+    def _notify(self) -> None:
+        with contextlib.suppress(RuntimeError):  # loop already closed on shutdown
+            self.outbox_loop.call_soon_threadsafe(self._wake.set)
+
     async def push_status(self, state: StatusState, detail: str = "") -> None:
-        self.status_queue.put(StatusMessage(state=state, detail=detail))
+        with self._outbox_lock:
+            self._statuses.append(StatusMessage(state=state, detail=detail))
+        self._notify()
 
     def push_frame(self, data: bytes) -> None:
-        # Keep only the latest frame: a slow WS consumer should see the newest
-        # screen state next, not catch up through a backlog of stale ones.
-        try:
-            self.frame_queue.put_nowait(data)
-        except queue.Full:
-            with contextlib.suppress(queue.Empty):
-                self.frame_queue.get_nowait()
-            with contextlib.suppress(queue.Full):
-                self.frame_queue.put_nowait(data)
+        with self._outbox_lock:
+            self._latest_frame = data
+        self._notify()
 
-    async def next_frame(self) -> bytes:
-        return await asyncio.to_thread(self.frame_queue.get)
+    async def next_outgoing(self) -> list[StatusMessage | bytes] | None:
+        """Everything queued since the last call, statuses first; None once the
+        session is closed and fully drained. Must run on `outbox_loop`."""
+        while True:
+            self._wake.clear()
+            with self._outbox_lock:
+                items: list[StatusMessage | bytes] = list(self._statuses)
+                self._statuses.clear()
+                if self._latest_frame is not None:
+                    items.append(self._latest_frame)
+                    self._latest_frame = None
+            if items:
+                return items
+            if self._closed.is_set():
+                return None
+            await self._wake.wait()
 
-    async def next_status(self) -> StatusMessage:
-        return await asyncio.to_thread(self.status_queue.get)
-
-    async def dispatch_input(self, message: MouseInput | KeyInput) -> None:
+    async def dispatch_input(self, message: MouseInput | KeyInput | TextInput) -> None:
         self.touch()
         await run_on_playwright_loop(self.relay.dispatch_input(message))
 
@@ -214,6 +244,7 @@ class RemoteBrowserManager:
         if session is None or session._closed.is_set():
             return
         session._closed.set()
+        session._notify()  # lets the WS writer drain and end instead of waiting forever
 
         for task in session._tasks:
             task.cancel()
@@ -224,6 +255,8 @@ class RemoteBrowserManager:
                 "remote_browser.stop_relay_failed", account_id=str(account_id), error=str(exc)
             )
         for closer in (session.context, session.browser):
+            if closer is None:
+                continue
             try:
                 await run_on_playwright_loop(closer.close())  # type: ignore[attr-defined]
             except Exception as exc:  # already closed/crashed is fine during cleanup
@@ -268,9 +301,16 @@ class RemoteBrowserManager:
         viewport = browser_fingerprint.viewport(browser_fp)
 
         await xvfb.ensure_running()
+        outbox_loop = asyncio.get_running_loop()
         return await run_on_playwright_loop(
             self._open_chromium(
-                account_id, workspace_id, slot_token, browser_fp, viewport, resolved
+                account_id,
+                workspace_id,
+                slot_token,
+                browser_fp,
+                viewport,
+                resolved,
+                outbox_loop,
             )
         )
 
@@ -282,6 +322,7 @@ class RemoteBrowserManager:
         browser_fp: dict,
         viewport: dict,
         resolved: object,
+        outbox_loop: asyncio.AbstractEventLoop,
     ) -> RemoteBrowserSession:
         try:
             pw = await get_playwright()
@@ -293,49 +334,66 @@ class RemoteBrowserManager:
         launch_kwargs: dict[str, object] = {
             "headless": False,
             "args": stealth.LAUNCH_ARGS,
+            # The account's own saved profile: the sign-in happens on the same
+            # "computer" every later campaign action will use.
+            "viewport": viewport,
+            "user_agent": browser_fingerprint.user_agent(browser_fp),
+            "locale": browser_fp.get("locale", "en-US"),
+            "timezone_id": browser_fp.get("timezone", "UTC"),
         }
         if resolved is not None:
             launch_kwargs["proxy"] = to_playwright_proxy(resolved)
+        profile_dir = browser_profile.prepare(account_id)
 
         try:
-            browser = await pw.chromium.launch(**launch_kwargs)  # type: ignore[attr-defined]
+            context = await pw.chromium.launch_persistent_context(profile_dir, **launch_kwargs)  # type: ignore[attr-defined]
         except Exception as headful_exc:
             log.warning("remote_browser.headful_failed", error=str(headful_exc))
             launch_kwargs["headless"] = True
             try:
-                browser = await pw.chromium.launch(**launch_kwargs)  # type: ignore[attr-defined]
+                context = await pw.chromium.launch_persistent_context(profile_dir, **launch_kwargs)  # type: ignore[attr-defined]
             except Exception as exc:
                 raise LaunchFailed(
                     "Could not start Chromium. Run `playwright install chromium` in the API venv."
                 ) from exc
-        context = await browser.new_context(
-            viewport=viewport,
-            user_agent=browser_fingerprint.user_agent(browser_fp),
-            locale=browser_fp.get("locale", "en-US"),
-            timezone_id=browser_fp.get("timezone", "UTC"),
-        )
-        await context.add_init_script(stealth.INIT_SCRIPT)
-        page = await context.new_page()
-        cdp = await context.new_cdp_session(page)
-        relay = CdpRelay(page, cdp)
+        browser = None  # a persistent context owns its browser; closing it closes both
+        try:
+            await context.add_init_script(stealth.INIT_SCRIPT)
+            pages = context.pages
+            page = pages[0] if pages else await context.new_page()
+            cdp = await context.new_cdp_session(page)
+            relay = CdpRelay(page, cdp)
 
-        session = RemoteBrowserSession(
-            account_id=account_id,
-            workspace_id=workspace_id,
-            browser=browser,
-            context=context,
-            page=page,
-            relay=relay,
-            slot_token=slot_token,
-        )
+            session = RemoteBrowserSession(
+                account_id=account_id,
+                workspace_id=workspace_id,
+                browser=browser,
+                context=context,
+                page=page,
+                relay=relay,
+                slot_token=slot_token,
+                outbox_loop=outbox_loop,
+            )
 
-        async def _on_frame(data: bytes) -> None:
-            session.push_frame(data)
+            async def _on_frame(data: bytes) -> None:
+                session.push_frame(data)
 
-        await relay.start_screencast(
-            width=viewport["width"], height=viewport["height"], on_frame=_on_frame
-        )
-        await page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded")
+            # A raw CDP send has no Playwright default timeout; bound it.
+            await asyncio.wait_for(
+                relay.start_screencast(
+                    width=viewport["width"], height=viewport["height"], on_frame=_on_frame
+                ),
+                timeout=15,
+            )
+            await page.goto(
+                "https://www.linkedin.com/login", wait_until="domcontentloaded", timeout=45000
+            )
+        except BaseException:
+            # Without this, every failed launch leaves a whole Chromium process
+            # tree running, and enough of them starve later launches.
+            with contextlib.suppress(Exception):
+                await context.close()
+            raise
         await session.push_status("live", "waiting for sign-in")
         return session
 
@@ -403,6 +461,14 @@ class RemoteBrowserManager:
         sealed = seal_for_transit(
             {"li_at": li_at, "jsessionid": jsessionid.strip('"'), "cookies": linkedin_cookies}
         )
+        await session.push_status("login_success", "signed in — finishing setup")
+        # Close the sign-in browser before verifying: verification opens this
+        # same saved profile, and two browsers on one profile corrupt it.
+        # Closing also flushes the fresh login to disk for every later action.
+        with contextlib.suppress(Exception):
+            await run_on_playwright_loop(session.relay.stop_screencast())
+        with contextlib.suppress(Exception):
+            await run_on_playwright_loop(session.context.close())  # type: ignore[attr-defined]
         from app.worker.tasks.linkedin_auth import connect_cookie
 
         if settings.environment == "development":
@@ -421,11 +487,10 @@ class RemoteBrowserManager:
                 await asyncio.to_thread(
                     lambda: connect_cookie.apply(args=[str(session.account_id), sealed]).get()
                 )
-        await session.push_status("login_success", "signed in — finishing setup")
         log.info("remote_browser.login_success", account_id=str(session.account_id))
         # Grace period so the frontend can show the success state before the
-        # browser closes out from under it.
-        await asyncio.sleep(5)
+        # socket closes.
+        await asyncio.sleep(3)
         await self.stop(session.account_id, reason="login_success")
 
 

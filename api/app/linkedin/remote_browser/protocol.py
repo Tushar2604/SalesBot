@@ -45,10 +45,19 @@ class KeyInput(BaseModel):
     code: str
     windows_virtual_key_code: int = 0
     text: str = ""
+    # CDP bitmask: Alt=1, Ctrl=2, Meta=4, Shift=8.
+    modifiers: int = 0
 
 
-InputMessage = Annotated[MouseInput | KeyInput, Field(discriminator="type")]
+class TextInput(BaseModel):
+    """A pasted string, inserted as-is at the focused element."""
+
+    type: Literal["text"] = "text"
+    text: str = Field(max_length=2000)
+
+
+InputMessage = Annotated[MouseInput | KeyInput | TextInput, Field(discriminator="type")]
 
 # `input_message_adapter.validate_json(raw)` parses one incoming client
-# message and dispatches to `MouseInput`/`KeyInput` by its `type` field.
-input_message_adapter: TypeAdapter[MouseInput | KeyInput] = TypeAdapter(InputMessage)
+# message and dispatches to `MouseInput`/`KeyInput`/`TextInput` by its `type` field.
+input_message_adapter: TypeAdapter[MouseInput | KeyInput | TextInput] = TypeAdapter(InputMessage)

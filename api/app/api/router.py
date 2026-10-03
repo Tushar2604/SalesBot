@@ -6,12 +6,15 @@ from fastapi import APIRouter
 
 from app.api import (
     API_V1_PREFIX,
+    routes_admin,
     routes_analytics,
     routes_assistant,
     routes_auth,
     routes_campaigns,
     routes_content,
     routes_inbox,
+    routes_integrations,
+    routes_lead_search,
     routes_leads,
     routes_linkedin,
     routes_linkedin_remote,
@@ -24,13 +27,16 @@ api_router.include_router(routes_auth.router)
 api_router.include_router(routes_workspaces.router)
 api_router.include_router(routes_linkedin.router)
 api_router.include_router(routes_leads.router)
+api_router.include_router(routes_lead_search.router)
 api_router.include_router(routes_campaigns.router)
 api_router.include_router(routes_inbox.router)
+api_router.include_router(routes_integrations.router)
 api_router.include_router(routes_assistant.router)
 api_router.include_router(routes_notifications.router)
 api_router.include_router(routes_analytics.router)
 api_router.include_router(routes_content.router)
 api_router.include_router(routes_linkedin_remote.router)
+api_router.include_router(routes_admin.router)
 # Public: LinkedIn redirects the member's browser here after consent, with no
 # session of ours attached. The signed `state` parameter is what authenticates it.
 api_router.include_router(routes_linkedin.oauth_router)

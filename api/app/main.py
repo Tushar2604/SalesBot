@@ -39,7 +39,8 @@ def create_app() -> FastAPI:
         version="0.1.0",
         description="Multi-tenant LinkedIn + email outreach automation.",
         lifespan=lifespan,
-        docs_url=None if settings.is_production else "/docs",
+        # Integrators need the reference; production hides it unless API_DOCS_PUBLIC=true.
+        docs_url="/docs" if settings.api_docs_public or not settings.is_production else None,
         redoc_url=None,
     )
 

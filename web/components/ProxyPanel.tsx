@@ -7,6 +7,7 @@
 
 import { useState } from "react";
 import { ApiError, linkedinApi, type ProxyRecord } from "@/lib/api";
+import { useRiskGuard } from "@/components/RiskGuard";
 
 export function ProxyPanel({
   workspaceId,
@@ -31,6 +32,7 @@ export function ProxyPanel({
   });
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const { guarded } = useRiskGuard();
 
   function update(field: keyof typeof form) {
     return (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
@@ -42,17 +44,24 @@ export function ProxyPanel({
     setError(null);
     setBusy(true);
     try {
-      await linkedinApi.createProxy(workspaceId, {
-        label: form.label || undefined,
-        provider: form.provider,
-        scheme: form.scheme,
-        host: form.host,
-        port: Number(form.port),
-        username: form.username || undefined,
-        password: form.password || undefined,
-        country: form.country.toUpperCase() || undefined,
-        sticky_session_id: form.sticky_session_id || undefined,
-      });
+      const created = await guarded((ack) =>
+        linkedinApi.createProxy(
+          workspaceId,
+          {
+            label: form.label || undefined,
+            provider: form.provider,
+            scheme: form.scheme,
+            host: form.host,
+            port: Number(form.port),
+            username: form.username || undefined,
+            password: form.password || undefined,
+            country: form.country.toUpperCase() || undefined,
+            sticky_session_id: form.sticky_session_id || undefined,
+          },
+          ack,
+        ),
+      );
+      if (!created) return; // kept safe: fix the proxy instead
       setForm({ ...form, host: "", port: "", username: "", password: "", label: "" });
       setOpen(false);
       onChanged();
@@ -203,6 +212,18 @@ export function ProxyPanel({
                 <p className="text-xs text-slate-500">
                   {proxy.provider}
                   {proxy.country && ` · ${proxy.country}`}
+                  {proxy.exit_country && (
+                    <span
+                      className={
+                        proxy.country && proxy.exit_country !== proxy.country
+                          ? "font-semibold text-red-600"
+                          : "text-emerald-700"
+                      }
+                    >
+                      {" · "}really exits in {proxy.exit_country}
+                      {proxy.last_exit_ip && ` (${proxy.last_exit_ip})`}
+                    </span>
+                  )}
                   {proxy.assigned_account_id ? " · bound to an account" : " · available"}
                 </p>
               </div>

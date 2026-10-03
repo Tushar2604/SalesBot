@@ -42,6 +42,10 @@ class Settings(BaseSettings):
 
     # object storage
     s3_endpoint_url: str | None = "http://minio:9000"
+    # Address browsers use for signed media links, when it differs from the
+    # internal one (e.g. https://files.example.com in front of MinIO). Unset:
+    # links are signed for `s3_endpoint_url`, right for real S3/R2.
+    s3_public_endpoint_url: str | None = None
     s3_region: str = "us-east-1"
     s3_bucket: str = "salesrobo"
     s3_access_key: SecretStr = SecretStr("minioadmin")
@@ -73,6 +77,34 @@ class Settings(BaseSettings):
     gemini_api_key: SecretStr = SecretStr("")
     gemini_model: str = "gemini-2.5-flash"
 
+    # AI lead finder: people-data providers, tried in this order until one
+    # returns people. Any of: exa, pdl, apollo, brave. A provider without a
+    # key is skipped. None of them touch a LinkedIn account — searching
+    # LinkedIn with a member's session is what gets accounts restricted.
+    lead_search_providers: str = "exa,pdl,apollo,brave"
+    exa_api_key: SecretStr = SecretStr("")
+    pdl_api_key: SecretStr = SecretStr("")
+    apollo_api_key: SecretStr = SecretStr("")
+    brave_search_api_key: SecretStr = SecretStr("")
+    # Each search spends provider credits; this caps one workspace's day.
+    lead_search_daily_limit: int = 50
+
+    # Integration layer. API keys: requests per minute per key.
+    api_key_rate_limit_per_minute: int = Field(default=300, ge=10, le=10_000)
+    # Serve the interactive API reference (/docs) in production too, for
+    # customers building integrations. Endpoints stay protected either way.
+    api_docs_public: bool = False
+    # Webhook URLs on private/loopback networks let a user make the server call
+    # its own internal services (SSRF). Off in production; None = allowed only
+    # in development and test, so a local receiver can be used while building.
+    webhooks_allow_private_urls: bool | None = None
+
+    @property
+    def allow_private_webhook_urls(self) -> bool:
+        if self.webhooks_allow_private_urls is not None:
+            return self.webhooks_allow_private_urls
+        return self.environment in ("development", "test")
+
     # billing
     stripe_secret_key: SecretStr = SecretStr("")
     stripe_webhook_secret: SecretStr = SecretStr("")
@@ -91,10 +123,17 @@ class Settings(BaseSettings):
     # "voyager" is the legacy httpx driver, which LinkedIn rejects after login.
     linkedin_driver: Literal["browser", "voyager"] = "browser"
     # How old an invite must be before we spend a page load checking for acceptance.
-    linkedin_acceptance_min_age_minutes: int = Field(default=60, ge=1)
+    linkedin_acceptance_min_age_minutes: int = Field(default=30, ge=1)
     # How long an unanswered invite keeps being checked before it is marked
     # expired ("no response"). Matches the 21-day hygiene rule in the safety docs.
     linkedin_invite_tracking_days: int = Field(default=21, ge=1, le=90)
+    # How many unread/changed threads the browser driver opens per inbox poll.
+    # Was 3: fine for a quiet inbox, but with more unread threads waiting than
+    # this every poll, whichever conversations sit further down the list never
+    # get opened at all — so they never reach the AI assistant for a draft.
+    # Raised, but still a real cap: opening dozens of threads in one pass would
+    # itself look like scraping rather than someone checking their messages.
+    linkedin_inbox_max_threads_per_poll: int = Field(default=10, ge=1, le=30)
     safety_default_test_mode: bool = True
     # Warm-up (test mode): invites/day falls in [daily_invites, daily_invites_max],
     # varied per account per day so the volume is not a constant. Messages are flat.
@@ -103,14 +142,25 @@ class Settings(BaseSettings):
     safety_test_mode_daily_messages: int = Field(default=2, ge=1, le=20)
     safety_max_daily_invites: int = Field(default=75, ge=1, le=100)
     safety_max_weekly_invites: int = Field(default=100, ge=1, le=200)
-    safety_min_action_gap_seconds: int = Field(default=45, ge=15)
-    safety_median_action_gap_seconds: int = Field(default=240, ge=30)
-    safety_max_action_gap_seconds: int = Field(default=1500, ge=60)
+    # Gap between any two actions of one account (campaign steps and bot
+    # replies alike): a random 2-10 minutes, median 5 — a person working
+    # through a list, not a script firing on a timer.
+    safety_min_action_gap_seconds: int = Field(default=120, ge=15)
+    safety_median_action_gap_seconds: int = Field(default=300, ge=30)
+    safety_max_action_gap_seconds: int = Field(default=600, ge=60)
 
     # ── remote-browser login (Phase 1) ───────────────────────────────────────
     # A real, human-driven Chromium session used only to establish a LinkedIn
     # login; see api/app/linkedin/remote_browser/. Kept separate from the
     # safety-engine settings above since these bound a UI session, not outreach.
+    # One saved Chromium profile per LinkedIn account (cookies, storage, cache),
+    # so every sign-in and action runs on the same "computer". Holds live
+    # sessions: keep it on private storage, never in the repository.
+    browser_profiles_dir: str = "/data/browser-profiles"
+    # Every LinkedIn account must go out through its own proxy. On a server,
+    # "no proxy" means the data-centre IP every account shares — the pattern
+    # LinkedIn bans. Unset: required in production, optional elsewhere.
+    require_proxy: bool | None = None
     remote_browser_max_concurrent: int = Field(default=3, ge=1, le=20)
     remote_browser_ttl_seconds: int = Field(default=900, ge=60)
     remote_browser_idle_timeout_seconds: int = Field(default=300, ge=30)
@@ -134,6 +184,19 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.environment == "production"
+
+    @property
+    def proxy_required(self) -> bool:
+        """Required in every real environment, including development.
+
+        Gating this on `is_production` is how most of this project's own
+        accounts ended up logging into LinkedIn over the bare server IP and
+        getting `auth_lost` almost immediately: "development" is not a reason
+        to skip the guard that keeps LinkedIn from clustering accounts by IP.
+        Only the automated test suite (`environment == "test"`) is exempt by
+        default, since it never touches a real LinkedIn session.
+        """
+        return self.require_proxy if self.require_proxy is not None else self.environment != "test"
 
     @property
     def cors_origins(self) -> list[str]:

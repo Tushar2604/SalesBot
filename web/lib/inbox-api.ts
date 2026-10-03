@@ -41,6 +41,8 @@ export type Conversation = {
   bot_pause_reason: string;
   bot_draft: string;
   bot_draft_at: string | null;
+  /** Auto mode: when the drafted reply is scheduled to go out. */
+  bot_send_at: string | null;
   bot_extracted: Record<string, string>;
 };
 
@@ -126,6 +128,13 @@ export const inboxApi = {
 
   discardDraft: (ws: string, id: string) =>
     apiFetch<Conversation>(`/workspaces/${ws}/conversations/${id}/bot/discard-draft`, {
+      method: "POST",
+    }),
+
+  /** Ask for a suggested reply now (from the account's SOPs). Lands on the
+   *  conversation a few seconds later: `bot_draft_at` moves when it is done. */
+  requestDraft: (ws: string, id: string) =>
+    apiFetch<Conversation>(`/workspaces/${ws}/conversations/${id}/bot/draft`, {
       method: "POST",
     }),
 };

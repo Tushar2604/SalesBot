@@ -89,6 +89,12 @@ class Workspace(UUIDPrimaryKey, Timestamps, Base):
     outreach_paused: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     settings: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
 
+    @property
+    def allow_recontact(self) -> bool:
+        """Testing switch: lift the "already contacted" dedupe so the same test
+        profiles can be run through campaigns again and again."""
+        return bool((self.settings or {}).get("testing", {}).get("allow_recontact"))
+
     members: Mapped[list[WorkspaceMember]] = relationship(
         back_populates="workspace", cascade="all, delete-orphan"
     )
@@ -174,6 +180,7 @@ class NotificationType(enum.StrEnum):
     MEMBER_JOINED = "member_joined"
     CAMPAIGN_COMPLETED = "campaign_completed"
     INVITE_UPDATE = "invite_update"
+    ACCOUNT_RISK = "account_risk"
     # Content Studio
     POST_SCHEDULED = "post_scheduled"
     POST_PUBLISHED = "post_published"

@@ -23,6 +23,7 @@ UPDATE with no orphaned job left behind.
 
 from __future__ import annotations
 
+import random
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -33,7 +34,8 @@ from sqlalchemy.orm import Session
 
 from app.core.logging import get_logger
 from app.db import session_scope
-from app.linkedin import publishing
+from app.integrations import events as integration_events
+from app.linkedin import guard, publishing
 from app.models.content import LinkedInPost, LinkedInPostMedia, MediaKind, PostStatus
 from app.models.linkedin import LinkedInAccount
 from app.models.tenancy import NotificationType
@@ -172,6 +174,19 @@ def _claim(db: Session, post_id: str) -> tuple[LinkedInPost, LinkedInAccount] | 
             )
         return None
 
+    # A post is an action like any other: it waits out the account's action
+    # gap (app/linkedin/guard.py) instead of going out right after an invite.
+    gap_ends = guard.earliest(account, now)
+    if gap_ends > now:
+        post.scheduled_at = gap_ends + timedelta(seconds=random.randint(5, 45))  # noqa: S311
+        log.info(
+            "content.publish_deferred",
+            post_id=post_id,
+            reason="action gap",
+            next_attempt_at=post.scheduled_at.isoformat(),
+        )
+        return None
+
     post.status = PostStatus.PUBLISHING
     post.attempts += 1
     post.publishing_started_at = now
@@ -279,6 +294,15 @@ def publish_post(self: Any, post_id: str) -> dict[str, str]:
                     media=media,
                     idempotency_key=publish_key,
                 )
+        except guard.TooSoon as too_soon:
+            # Another action took the gap between claim and publish. Nothing
+            # was posted; put it back in the schedule without using an attempt.
+            post.status = PostStatus.SCHEDULED
+            post.scheduled_at = too_soon.retry_at + timedelta(seconds=random.randint(5, 45))  # noqa: S311
+            post.attempts = max(0, post.attempts - 1)
+            post.publish_key = None
+            post.publishing_started_at = None
+            return {"status": "deferred", "reason": "action gap"}
         except publishing.PublishingError as error:
             if error.auth_lost:
                 publishing.clear_grant(account, reason=error.message)
@@ -335,6 +359,19 @@ def publish_post(self: Any, post_id: str) -> dict[str, str]:
             "LinkedIn post published",
             body=(post.content[:200] or "Your post is live on LinkedIn."),
             link=f"/content/{post.id}",
+        )
+        integration_events.emit_sync(
+            db,
+            workspace_id,
+            "post.published",
+            {
+                "post_id": str(post.id),
+                "linkedin_post_id": post.linkedin_post_id,
+                "url": post.linkedin_url,
+                "text": post.content,
+                "published_at": now.isoformat(),
+                "account": integration_events.account_data(account),
+            },
         )
         audit.record_sync(
             db,

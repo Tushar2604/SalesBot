@@ -13,7 +13,9 @@ from typing import Any
 from app.ai.classify import classify_inbound
 from app.core.logging import get_logger
 from app.db import session_scope
+from app.integrations import events as integration_events
 from app.models.inbox import Conversation, LabelSource, Message, MessageDirection
+from app.models.leads import Lead
 from app.worker.celery_app import celery_app
 
 log = get_logger(__name__)
@@ -34,8 +36,22 @@ def classify_message(self: Any, message_id: str) -> dict[str, int]:
         conversation = db.get(Conversation, message.conversation_id)
         # A human's own label wins; AI only fills in an unset/AI-set one.
         if conversation is not None and conversation.label_source is not LabelSource.MANUAL:
+            changed = conversation.label != label
             conversation.label = label
             conversation.label_source = LabelSource.AI
+            if changed:
+                lead = db.get(Lead, conversation.lead_id) if conversation.lead_id else None
+                integration_events.emit_sync(
+                    db,
+                    conversation.workspace_id,
+                    "conversation.labeled",
+                    {
+                        "conversation_id": str(conversation.id),
+                        "label": label.value,
+                        "message_text": message.body,
+                        "lead": integration_events.lead_data(lead),
+                    },
+                )
 
         log.info("ai.message_classified", message_id=str(message.id), label=label.value)
     return {"classified": 1}

@@ -36,6 +36,8 @@ class ConversationResponse(BaseModel):
     bot_pause_reason: str = ""
     bot_draft: str = ""
     bot_draft_at: datetime | None = None
+    # Auto mode: when the drafted reply is scheduled to go out.
+    bot_send_at: datetime | None = None
     bot_extracted: dict[str, str] = {}
 
 

@@ -40,10 +40,13 @@ celery_app = Celery(
         "app.worker.tasks.scheduler",
         "app.worker.tasks.linkedin_auth",
         "app.worker.tasks.actions",
+        "app.worker.tasks.feed",
+        "app.worker.tasks.auto_engage",
         "app.worker.tasks.sync",
         "app.worker.tasks.ai",
         "app.worker.tasks.assistant",
         "app.worker.tasks.content",
+        "app.worker.tasks.webhooks",
     ],
 )
 
@@ -103,6 +106,20 @@ celery_app.conf.beat_schedule = {
         "task": "scheduler.tick",
         "schedule": 60.0,
         "options": {"expires": 55},
+    },
+    # Autonomous liking, for accounts that opted in. Each tick only *considers*
+    # queuing one more like (see auto_engage.py); actually running it is still
+    # the dispatcher's job, on its own pacing.
+    # Webhook outbox: sends events recorded by the rest of the app, with retries.
+    "webhooks-deliver-due": {
+        "task": "webhooks.deliver_due",
+        "schedule": 15.0,
+        "options": {"expires": 14},
+    },
+    "auto-like-sweep": {
+        "task": "linkedin.action.auto_like_sweep",
+        "schedule": 1200.0,
+        "options": {"expires": 1100},
     },
 }
 

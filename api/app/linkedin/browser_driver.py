@@ -7,9 +7,10 @@ the way a person does — open the profile, click Connect, type the note, click
 Send — inside a headed Chromium (under Xvfb) that carries the account's frozen
 desktop identity, its proxy, and the cookies from the remote-browser login.
 
-Scope: connect, profile view, invite with a note, message, acceptance check.
-Reply polling, people search and invite withdrawal are not implemented; each
-says so rather than returning fabricated data.
+Scope: connect, profile view, invite with a note, message, acceptance check,
+feed reading, liking a post. Reply polling, people search and invite
+withdrawal are not implemented; each says so rather than returning
+fabricated data.
 
 Selectors are role/text based rather than CSS-class based because LinkedIn's
 class names are generated. When a step cannot find its element the driver saves
@@ -24,12 +25,14 @@ from __future__ import annotations
 import random
 import re
 import time
+import uuid
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 
+from app.config import settings
 from app.core.logging import get_logger
 from app.linkedin.classify import Classification, ResponseClass, classify_response
 from app.linkedin.driver import (
@@ -38,6 +41,7 @@ from app.linkedin.driver import (
     ChallengeContext,
     ConnectionStatus,
     ConversationSnapshot,
+    FeedPost,
     MessageEvent,
     ProfileSnapshot,
     SearchPage,
@@ -58,7 +62,6 @@ _DEGREE_RE = re.compile(r"\b(1st|2nd|3rd)\b")
 _DEGREE_VALUE = {"1st": 1, "2nd": 2, "3rd": 3}
 
 # Inbox scraping. Read from the messaging page LinkedIn itself renders.
-_MAX_THREADS_PER_POLL = 3
 _TIME_RE = re.compile(r"\b(\d{1,2}:\d{2}\s?[AP]M)\b", re.I)
 _THREAD_RE = re.compile(r"/messaging/thread/([^/?#]+)")
 _MONTHS = {
@@ -92,20 +95,33 @@ _TOP_CARD_JS = r"""
 }
 """
 
-_ROWS_JS = """
+_ROWS_JS = r"""
 () => Array.from(document.querySelectorAll('li.msg-conversation-listitem')).map((li, i) => ({
   i,
   name: ((li.querySelector('[class*="participant-names"]') || {}).innerText || '').trim(),
   unread: !!li.querySelector('[class*="unread"]'),
   active: !!li.querySelector('[class*="link--active"]'),
+  // The row's whole visible text (name, time, last-message preview): compared
+  // with what is stored to tell a thread that changed from one that did not.
+  text: (li.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 400),
 }))
 """
+
+# Lifetime given to login cookies put into a saved profile (LinkedIn's own
+# li_at lasts about a year).
+_SEEDED_COOKIE_LIFETIME_S = 180 * 24 * 3600
+
+# How long a thread's messages may take to render after the list shows up.
+_THREAD_LOAD_MS = 12000
 
 _EVENTS_JS = """
 () => {
   const out = [];
   let heading = '';
   document.querySelectorAll('ul[class*="msg-s-message-list-content"] > li').forEach(li => {
+    // The day divider usually sits inside the first message's own <li>.
+    const divider = li.querySelector('time[class*="time-heading"], [class*="list__time-heading"]');
+    if (divider && (divider.innerText || '').trim()) heading = divider.innerText.trim();
     const events = li.querySelectorAll('[data-event-urn]');
     if (!events.length) {
       const t = (li.innerText || '').trim();
@@ -133,6 +149,38 @@ _EVENTS_JS = """
 # Chromium flags a container needs. Deliberately no automation-masking patches:
 # this browser is honestly an automated one, driven at human pace.
 _LAUNCH_ARGS: Final[list[str]] = ["--no-sandbox", "--disable-dev-shm-usage"]
+
+# Feed scraping. `[class*=...]` partial matches, same as the inbox/thread
+# readers above, because LinkedIn's class names carry hashed suffixes.
+_FEED_JS = r"""
+() => Array.from(document.querySelectorAll('div[data-urn^="urn:li:activity"]')).map((el) => {
+  const clean = (t) => (t || '').trim().replace(/\s+/g, ' ');
+  const nameEl = el.querySelector('[class*="actor__name"]');
+  const headlineEl = el.querySelector('[class*="actor__description"]');
+  const avatarEl = el.querySelector('[class*="actor"] img');
+  const textEl = el.querySelector('[class*="update-components-text"]');
+  const likeBtn = el.querySelector(
+    'button[aria-label="Like"], button[aria-label="Unlike"], button[aria-label^="React Like"]'
+  );
+  const liked = !!likeBtn && /unlike/i.test(likeBtn.getAttribute('aria-label') || '');
+  const social = el.querySelector('[class*="social-counts"]');
+  const images = Array.from(el.querySelectorAll('[class*="update-components-image"] img'))
+    .map((img) => img.src)
+    .filter(Boolean);
+  return {
+    urn: el.getAttribute('data-urn') || '',
+    author_name: clean(nameEl && nameEl.innerText),
+    author_headline: clean(headlineEl && headlineEl.innerText),
+    author_avatar_url: avatarEl ? avatarEl.src : '',
+    text: clean(textEl && textEl.innerText).slice(0, 3000),
+    liked,
+    social_text: clean(social && social.innerText),
+    images: images.slice(0, 4),
+  };
+}).filter((p) => p.urn)
+"""
+
+_SOCIAL_COUNT_RE = re.compile(r"([\d,]+)")
 
 
 def _read_connection_status(card: dict[str, Any] | None) -> ConnectionStatus:
@@ -168,6 +216,24 @@ def _unknown(detail: str) -> Classification:
     return Classification(ResponseClass.UNKNOWN_SHAPE, detail=detail)
 
 
+def _settle_times(events: list[MessageEvent], now: datetime) -> None:
+    """Keeps read-off times in thread order and out of the future.
+
+    A thread shows only a clock time under each day divider; when the divider
+    is missed the day defaults to today, which puts last night's 11 PM message
+    after this morning's. The thread is oldest-first, so walking back from the
+    newest, each time must be no later than the one after it: step back a day
+    at a time until it is.
+    """
+    ceiling = now + timedelta(minutes=5)
+    for event in reversed(events):
+        if event.sent_at is None:
+            continue
+        while event.sent_at > ceiling:
+            event.sent_at -= timedelta(days=1)
+        ceiling = event.sent_at
+
+
 class BrowserDriver:
     """One instance per account, per unit of work. Not thread-safe by design."""
 
@@ -179,10 +245,14 @@ class BrowserDriver:
         session: SessionBundle | None = None,
         timeout: float = 30.0,
         timezone: str = "UTC",
+        profile_account_id: uuid.UUID | None = None,
     ) -> None:
         self._browser_fp: dict[str, Any] = fingerprint.get(
             "browser"
         ) or browser_fingerprint.generate(timezone=timezone)
+        # Set: run inside this account's saved browser profile (see
+        # browser_profile.py). None: a throwaway browser, as in tests.
+        self._profile_account_id = profile_account_id
         self._proxy_url = proxy_url
         self._session = session
         self._timeout_ms = int(timeout * 1000)
@@ -210,29 +280,56 @@ class BrowserDriver:
                 proxy["password"] = parts.password
             launch["proxy"] = proxy
 
-        self._browser = self._pw.chromium.launch(**launch)
-        self._context = self._browser.new_context(
-            viewport=dict(browser_fingerprint.viewport(self._browser_fp)),
-            user_agent=browser_fingerprint.user_agent(self._browser_fp),
-            locale=self._browser_fp.get("locale", "en-US"),
-            timezone_id=self._browser_fp.get("timezone", "UTC"),
-        )
-        if self._session is not None:
-            self._context.add_cookies(
-                [
-                    {
-                        "name": name,
-                        "value": value,
-                        "domain": ".linkedin.com",
-                        "path": "/",
-                        "secure": True,
-                    }
-                    for name, value in self._session.cookies.items()
-                ]
+        identity: dict[str, Any] = {
+            "viewport": dict(browser_fingerprint.viewport(self._browser_fp)),
+            "user_agent": browser_fingerprint.user_agent(self._browser_fp),
+            "locale": self._browser_fp.get("locale", "en-US"),
+            "timezone_id": self._browser_fp.get("timezone", "UTC"),
+        }
+        if self._profile_account_id is not None:
+            from app.linkedin import browser_profile
+
+            self._context = self._pw.chromium.launch_persistent_context(
+                browser_profile.prepare(self._profile_account_id), **launch, **identity
             )
-        self._page = self._context.new_page()
+        else:
+            self._browser = self._pw.chromium.launch(**launch)
+            self._context = self._browser.new_context(**identity)
+        self._seed_session_cookies(self._context)
+        pages = self._context.pages
+        self._page = pages[0] if pages else self._context.new_page()
         self._page.set_default_timeout(self._timeout_ms)
         return self._page
+
+    def _seed_session_cookies(self, context: BrowserContext) -> None:
+        """Puts the stored session into the browser, unless it already has it.
+
+        A saved profile keeps its own cookies between runs — including the ones
+        LinkedIn uses to recognise the device — so they are only overwritten
+        when the stored session is a different login (a fresh profile, or a
+        reconnect since the profile was last used).
+        """
+        if self._session is None:
+            return
+        have = {c["name"]: c["value"] for c in context.cookies("https://www.linkedin.com")}
+        if have.get("li_at") == self._session.cookies.get("li_at"):
+            return
+        # With an expiry, as LinkedIn sets them: a cookie without one is a
+        # session cookie, which the saved profile would forget on every close.
+        expires = time.time() + _SEEDED_COOKIE_LIFETIME_S
+        context.add_cookies(
+            [
+                {
+                    "name": name,
+                    "value": value,
+                    "domain": ".linkedin.com",
+                    "path": "/",
+                    "secure": True,
+                    "expires": expires,
+                }
+                for name, value in self._session.cookies.items()
+            ]
+        )
 
     @staticmethod
     def _pause(low: float, high: float, page: Page | None = None) -> None:
@@ -500,6 +597,7 @@ class BrowserDriver:
             )
         if not events:
             return None
+        _settle_times(events, datetime.now(UTC))
 
         newest = events[-1]
         return ConversationSnapshot(
@@ -522,16 +620,63 @@ class BrowserDriver:
             return False
         return "no messages yet" in body.lower()
 
+    @staticmethod
+    def _wait_for_thread(page: Page, previous_thread: str | None) -> bool:
+        """Waits until the right-hand pane shows a (new) thread's messages.
+
+        The conversation list renders before the open thread does; reading at
+        that moment found no messages, so every thread was silently dropped.
+        """
+        deadline = time.monotonic() + _THREAD_LOAD_MS / 1000
+        while time.monotonic() < deadline:
+            match = _THREAD_RE.search(page.url)
+            current = match.group(1) if match else None
+            if current and current != previous_thread:
+                try:
+                    page.locator(
+                        'ul[class*="msg-s-message-list-content"] [data-event-urn]'
+                    ).first.wait_for(timeout=max(500, int((deadline - time.monotonic()) * 1000)))
+                except Exception:
+                    return False
+                page.wait_for_timeout(600)  # let the rest of the thread finish rendering
+                return True
+            page.wait_for_timeout(300)
+        return False
+
+    @staticmethod
+    def _row_changed(row: dict[str, Any], known: dict[str, str]) -> bool:
+        """True unless the row's preview still shows the message already stored."""
+        stored = " ".join(known.get(str(row["name"]).strip().lower(), "").split()).lower()
+        if not stored:
+            return True
+        return stored[:30] not in str(row.get("text", "")).lower()
+
     def list_conversations(
-        self, limit: int = 20
+        self, limit: int = 20, known: dict[str, str] | None = None
     ) -> tuple[Classification, list[ConversationSnapshot]]:
         """Reads the inbox the way a person checks it.
 
         /messaging/ opens the newest thread on its own, which is where a reply
-        or one of our own sends shows up. Any other unread thread is opened with
-        a click (a client-side navigation, not another page load), up to a small
-        cap. Opening a thread marks it read on LinkedIn, as it would for its owner.
+        or one of our own sends shows up. Every other row that looks unread or
+        changed is a candidate to open with a click (a client-side navigation,
+        not another page load), up to a cap
+        (`settings.linkedin_inbox_max_threads_per_poll`) — opening the whole
+        inbox in one pass would itself look like scraping.
+
+        Candidates are opened truly-unread-first, not in list order: LinkedIn
+        sorts by recency, and a row's preview text includes its timestamp, so
+        an old, already-read thread can still look "changed" an hour later
+        just because the timestamp ticked over. Without prioritising real
+        unread rows, that noise could keep winning the limited slots every
+        poll and starve a thread further down the list of ever being opened —
+        which is what stops it from ever reaching the AI assistant for a draft.
+
+        `known` maps a participant's name (lowercased) to the last message
+        stored for that thread. A row whose preview differs is a candidate
+        even when it is not unread: a reply you already read on your phone is
+        still new to this inbox.
         """
+        known = known or {}
         page, classification = self._goto("/messaging/")
         if not classification.ok:
             return classification, []
@@ -549,22 +694,61 @@ class BrowserDriver:
         rows: list[dict[str, Any]] = page.evaluate(_ROWS_JS)
         snapshots: list[ConversationSnapshot] = []
         opened = 0
+        cap = settings.linkedin_inbox_max_threads_per_poll
+
+        active_rows = [row for row in rows[: max(1, limit)] if row["active"]]
+        unread_first: list[dict[str, Any]] = []
+        changed_only: list[dict[str, Any]] = []
         for row in rows[: max(1, limit)]:
-            if not row["active"]:
-                if not row["unread"] or opened >= _MAX_THREADS_PER_POLL - 1:
-                    continue
-                self._pause(0.8, 2.0, page)
-                page.locator("li.msg-conversation-listitem").nth(row["i"]).click()
-                self._pause(1.8, 3.2, page)
-                opened += 1
+            if row["active"]:
+                continue
+            if row["unread"]:
+                unread_first.append(row)
+            elif self._row_changed(row, known):
+                changed_only.append(row)
+        candidates = unread_first + changed_only
+
+        def _read_row(row: dict[str, Any]) -> None:
+            nonlocal snapshots
             try:
                 snapshot = self._read_open_thread(page, row["name"], row["unread"])
             except Exception:
                 log.warning("linkedin.browser.thread_read_failed", row=row["i"])
                 self._screenshot("inbox-thread-error")
-                continue
+                return
             if snapshot is not None:
                 snapshots.append(snapshot)
+
+        for row in active_rows:
+            if not self._wait_for_thread(page, None):
+                log.info("linkedin.browser.thread_not_loaded", row=row["i"])
+                continue
+            opened += 1
+            _read_row(row)
+
+        skipped_over_cap = 0
+        for row in candidates:
+            if opened >= cap:
+                skipped_over_cap += 1
+                continue
+            before = _THREAD_RE.search(page.url)
+            self._pause(0.8, 2.0, page)
+            page.locator("li.msg-conversation-listitem").nth(row["i"]).click()
+            opened += 1
+            if not self._wait_for_thread(page, before.group(1) if before else None):
+                log.info("linkedin.browser.thread_not_loaded", row=row["i"])
+                continue
+            self._pause(0.8, 1.6, page)
+            _read_row(row)
+
+        if skipped_over_cap:
+            # Not a failure — just more waiting than one poll clears. The next
+            # poll (10 minutes later) picks up wherever this one left off.
+            log.info(
+                "linkedin.browser.inbox_poll_capped",
+                cap=cap,
+                skipped=skipped_over_cap,
+            )
         return Classification(ResponseClass.OK), snapshots
 
     def warm_session(self) -> Classification:
@@ -572,6 +756,58 @@ class BrowserDriver:
         if classification.ok:
             self._scroll_like_reading(page, passes=random.randint(2, 4))  # noqa: S311
         return classification
+
+    def get_feed(self, count: int = 10, start: int = 0) -> tuple[Classification, list[FeedPost]]:
+        """Reads the home feed the way a person scrolling it would.
+
+        Scrolling (rather than jumping straight to `start`) is what actually
+        loads the later posts into the DOM — LinkedIn's feed is infinite-scroll,
+        there is no page parameter to ask for. `start`/`count` slice what has
+        already loaded.
+        """
+        page, classification = self._goto("/feed/")
+        if not classification.ok:
+            return classification, []
+        try:
+            page.locator('div[data-urn^="urn:li:activity"]').first.wait_for(timeout=10000)
+        except Exception:
+            # An empty feed is a real (if unusual) state, not a failure.
+            return classification, []
+
+        needed = start + count
+        for _ in range(6):
+            try:
+                loaded = page.locator('div[data-urn^="urn:li:activity"]').count()
+            except Exception:
+                break
+            if loaded >= needed:
+                break
+            self._scroll_like_reading(page, passes=1)
+
+        try:
+            raw: list[dict[str, Any]] = page.evaluate(_FEED_JS)
+        except Exception:
+            self._screenshot("feed-parse-failed")
+            return _unknown("feed page did not parse"), []
+
+        posts: list[FeedPost] = []
+        for item in raw[start : start + count]:
+            social_text = str(item.get("social_text") or "")
+            count_match = _SOCIAL_COUNT_RE.search(social_text)
+            posts.append(
+                FeedPost(
+                    urn=str(item.get("urn") or ""),
+                    author_name=str(item.get("author_name") or ""),
+                    author_headline=str(item.get("author_headline") or ""),
+                    author_avatar_url=str(item.get("author_avatar_url") or ""),
+                    text=str(item.get("text") or ""),
+                    liked=bool(item.get("liked")),
+                    like_count=int(count_match.group(1).replace(",", "")) if count_match else 0,
+                    image_urls=list(item.get("images") or []),
+                    raw=item,
+                )
+            )
+        return classification, posts
 
     # ── writes ───────────────────────────────────────────────────────────────
 
@@ -829,6 +1065,62 @@ class BrowserDriver:
                 "withdrawing invitations is not supported by the browser driver"
             )
         )
+
+    def like_post(self, post_urn: str) -> ActionResult:
+        """Opens the post on its own permalink and clicks Like.
+
+        The permalink, not the feed's current scroll position, is what makes
+        this reliable to run minutes after the feed was read: the feed may
+        have refreshed by then, but `/feed/update/<urn>/` always resolves.
+        """
+        urn = post_urn.strip()
+        if not urn:
+            return ActionResult(classification=_unknown("no post urn to like"))
+
+        page, classification = self._goto(f"/feed/update/{urn}/")
+        if not classification.ok:
+            return ActionResult(classification=classification)
+
+        try:
+            post = page.locator(f'div[data-urn="{urn}"]').first
+            post.wait_for(state="visible", timeout=10000)
+        except Exception:
+            self._screenshot("like-post-not-found")
+            return ActionResult(classification=_unknown("could not find the post to like"))
+
+        try:
+            already = post.locator('button[aria-label="Unlike"]')
+            if already.count():
+                return ActionResult(
+                    classification=Classification(ResponseClass.OK),
+                    remote_id=urn,
+                    payload={"already": "liked"},
+                )
+
+            like_btn = post.get_by_role("button", name=re.compile(r"^Like$", re.I))
+            if not like_btn.count():
+                self._screenshot("like-no-button")
+                return ActionResult(classification=_unknown("post had no Like control"))
+
+            like_btn.first.scroll_into_view_if_needed()
+            like_btn.first.hover()
+            self._pause(0.4, 1.1, page)
+            like_btn.first.click()
+            self._pause(1.2, 2.4, page)
+
+            after = self._classify_page(page, None)
+            if not after.ok:
+                return ActionResult(classification=after)
+
+            if not post.locator('button[aria-label="Unlike"]').count():
+                self._screenshot("like-not-confirmed")
+                return ActionResult(
+                    classification=_unknown("Like was clicked but the post did not confirm it")
+                )
+            return ActionResult(classification=Classification(ResponseClass.OK), remote_id=urn)
+        except Exception as exc:
+            self._screenshot("like-error")
+            return ActionResult(classification=_unknown(f"like step failed: {type(exc).__name__}"))
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 

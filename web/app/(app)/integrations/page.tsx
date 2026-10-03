@@ -1,98 +1,118 @@
 "use client";
 
 /**
- * Integrations. Each card is a real destination in this app (webhooks land on
- * Admin Settings once that backend exists) except third-party ones (Hyperise)
- * which have no vendor account configured here — those show an explanatory
- * dialog instead of pretending to configure a live integration.
+ * Integrations: connect this workspace to any other website or tool.
+ *
+ *   In  (they call us)   REST API with API keys: every workspace endpoint
+ *   Out (we call them)   webhooks: signed events with retries and a log
+ *
+ * Zapier, Make, n8n, a CRM or your own server all use the same two pieces.
  */
 
 import { useState } from "react";
-import Link from "next/link";
-import { IconBriefcase, IconClose, IconLink } from "@/components/app/icons";
-import { RobotMark } from "@/components/app/icons";
+import { hasRole, useSession } from "@/lib/session";
+import { TabBar } from "@/components/app/TabBar";
+import { ApiKeysPanel, IntegrationDocs, WebhooksPanel } from "@/components/integrations/IntegrationPanels";
+import { IconKey, IconLink } from "@/components/app/icons";
 
-const CARDS = [
+const TABS = [
+  { key: "overview", label: "Overview" },
+  { key: "api-keys", label: "API keys" },
+  { key: "webhooks", label: "Webhooks" },
+  { key: "docs", label: "Docs" },
+];
+
+const RECIPES = [
   {
-    key: "webhooks",
-    title: "Webhooks",
-    description: "Add webhook integrations like Zapier to export data in real time.",
-    icon: IconLink,
+    title: "Send replies to your CRM",
+    body: "Webhook on reply.received → create or update the contact and log the message in HubSpot, Salesforce or Pipedrive.",
   },
   {
-    key: "hyperise",
-    title: "Hyperise",
-    description: "Use custom gifs/images along with your messages to gain more traction.",
-    icon: IconBriefcase,
+    title: "Add leads from anywhere",
+    body: "A form, a spreadsheet row or a CRM list calls POST /leads/import-urls with LinkedIn profile links.",
   },
   {
-    key: "salesrobo",
-    title: "SalesRobo",
-    description: "Configure your CRM to control SalesRobo. Like pausing/continuing sequence.",
-    icon: RobotMark,
+    title: "Alert your team",
+    body: "Webhook on invite.accepted or assistant.handoff → post to Slack or Teams so someone follows up.",
   },
   {
-    key: "direct",
-    title: "Integrate directly",
-    description: "Directly integrate using your API key from Admin Settings.",
-    icon: IconLink,
+    title: "Stop outreach from your CRM",
+    body: "When a deal closes, call POST /campaigns/{id}/status with paused, or remove the person from the list.",
   },
 ];
 
 export default function IntegrationsPage() {
-  const [open, setOpen] = useState<string | null>(null);
-  const card = CARDS.find((c) => c.key === open) ?? null;
+  const { workspace, role } = useSession();
+  const workspaceId = workspace?.id ?? null;
+  const isAdmin = hasRole(role, "admin");
+  const [tab, setTab] = useState("overview");
+
+  if (!workspaceId) return <p className="text-sm text-slate-500">Select a workspace.</p>;
 
   return (
     <div className="mx-auto max-w-5xl">
-      <h1 className="mb-6 text-2xl font-semibold text-ink-950">Integrations</h1>
+      <h1 className="text-2xl font-semibold text-ink-950">Integrations</h1>
+      <p className="mb-5 mt-1 text-sm text-slate-500">
+        Connect this workspace to any other website or tool: they can call our API, and we notify them when things
+        happen.
+      </p>
 
-      <div className="grid gap-4 sm:grid-cols-2">
-        {CARDS.map((c) => (
-          <div key={c.key} className="card">
-            <span className="mb-4 flex h-10 w-10 items-center justify-center rounded-lg bg-brand-50 text-brand-500">
-              <c.icon className="h-5 w-5" />
-            </span>
-            <h2 className="mb-1 font-medium text-ink-950">{c.title}</h2>
-            <p className="mb-4 text-sm text-slate-500">{c.description}</p>
-            <button className="text-[13px] font-semibold text-brand-600 hover:underline" onClick={() => setOpen(c.key)}>
-              Configure →
-            </button>
-          </div>
-        ))}
-      </div>
+      <TabBar tabs={TABS} active={tab} onChange={setTab} />
 
-      {card && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-6">
-            <div className="mb-4 flex items-start justify-between">
-              <h2 className="font-medium text-ink-950">{card.title}</h2>
-              <button onClick={() => setOpen(null)} aria-label="Close" className="text-slate-400 hover:text-ink-950">
-                <IconClose className="h-4 w-4" />
-              </button>
-            </div>
-            {card.key === "webhooks" || card.key === "direct" ? (
-              <>
-                <p className="mb-4 text-sm text-slate-500">
-                  Generate an API key from Admin Settings to authenticate outbound requests.
+      {!isAdmin && tab !== "overview" && tab !== "docs" ? (
+        <div className="card mt-4">
+          <p className="text-sm text-slate-500">Only workspace admins can manage API keys and webhooks.</p>
+        </div>
+      ) : (
+        <div className="mt-4">
+          {tab === "overview" && (
+            <div className="space-y-4">
+              <div className="grid gap-4 sm:grid-cols-2">
+                <button className="card text-left transition-colors hover:border-brand-300" onClick={() => setTab("api-keys")}>
+                  <span className="mb-3 flex h-10 w-10 items-center justify-center rounded-lg bg-brand-50 text-brand-500">
+                    <IconKey className="h-5 w-5" />
+                  </span>
+                  <h2 className="mb-1 font-medium text-ink-950">REST API</h2>
+                  <p className="text-sm text-slate-500">
+                    Other systems add leads, run campaigns and read the inbox using an API key, with the same safety
+                    limits as the app.
+                  </p>
+                </button>
+                <button className="card text-left transition-colors hover:border-brand-300" onClick={() => setTab("webhooks")}>
+                  <span className="mb-3 flex h-10 w-10 items-center justify-center rounded-lg bg-brand-50 text-brand-500">
+                    <IconLink className="h-5 w-5" />
+                  </span>
+                  <h2 className="mb-1 font-medium text-ink-950">Webhooks</h2>
+                  <p className="text-sm text-slate-500">
+                    Get a signed POST when a lead replies, accepts an invite, gets labelled and more. Retried for a
+                    day if your server is down.
+                  </p>
+                </button>
+              </div>
+              <div className="card">
+                <h2 className="mb-3 font-medium text-ink-950">What people build with it</h2>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {RECIPES.map((recipe) => (
+                    <div key={recipe.title} className="rounded-lg border border-slate-200 p-3">
+                      <p className="text-[13.5px] font-semibold text-ink-950">{recipe.title}</p>
+                      <p className="mt-0.5 text-[12.5px] text-slate-500">{recipe.body}</p>
+                    </div>
+                  ))}
+                </div>
+                <p className="mt-3 text-[12.5px] text-slate-500">
+                  No-code: in Zapier, Make or n8n, use a &ldquo;Webhooks / catch hook&rdquo; trigger for events, and an
+                  &ldquo;HTTP request&rdquo; action with your API key to call us.
                 </p>
-                <Link href="/admin/settings" className="btn-primary inline-flex" onClick={() => setOpen(null)}>
-                  Go to API Key
-                </Link>
-              </>
-            ) : card.key === "salesrobo" ? (
-              <p className="text-sm text-slate-500">
-                A campaign can already be paused or resumed from its detail page, and the whole
-                workspace can be paused from Team → Outreach kill switch. A CRM-triggered webhook
-                for this needs the outbound webhook backend above.
-              </p>
-            ) : (
-              <p className="text-sm text-slate-500">
-                This integration needs a {card.title} vendor account, which isn&apos;t connected in
-                this environment.
-              </p>
-            )}
-          </div>
+              </div>
+            </div>
+          )}
+          {tab === "api-keys" && (
+            <div className="card">
+              <ApiKeysPanel workspaceId={workspaceId} />
+            </div>
+          )}
+          {tab === "webhooks" && <WebhooksPanel workspaceId={workspaceId} />}
+          {tab === "docs" && <IntegrationDocs workspaceId={workspaceId} />}
         </div>
       )}
     </div>

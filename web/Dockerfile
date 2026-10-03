@@ -13,6 +13,9 @@ CMD ["npm", "run", "dev"]
 
 # ── build stage ───────────────────────────────────────────────────────────────
 FROM base AS builder
+# Inlined into the browser bundle at build time, so it must be known here.
+ARG NEXT_PUBLIC_API_BASE_URL
+ENV NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_BASE_URL
 RUN npm ci || npm install
 COPY . .
 RUN npm run build
@@ -20,7 +23,7 @@ RUN npm run build
 # ── prod: standalone output, non-root ─────────────────────────────────────────
 FROM node:20-alpine AS prod
 WORKDIR /srv
-ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1
+ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 HOSTNAME=0.0.0.0 PORT=3000
 RUN addgroup -g 10001 nodejs && adduser -u 10001 -G nodejs -S nextjs
 COPY --from=builder --chown=nextjs:nodejs /srv/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /srv/.next/static ./.next/static

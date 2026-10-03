@@ -61,6 +61,9 @@ EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 
 # ── prod-with-browser: same idea, prod deps + non-root ──────────────────────────
+# Used by `api` (sign-in windows) and `worker` (every LinkedIn action runs in a
+# real Chromium). The browser-profiles directory is created here, owned by
+# appuser, so a fresh named volume mounted over it inherits that ownership.
 FROM base AS prod-with-browser
 RUN pip install --no-cache-dir ".[browser]"
 RUN apt-get update \
@@ -69,9 +72,14 @@ RUN apt-get update \
 RUN playwright install --with-deps chromium
 COPY . .
 RUN useradd --create-home --uid 10001 appuser \
-    && chown -R appuser:appuser /srv /ms-playwright
+    && mkdir -p /data/browser-profiles /srv/debug_screens \
+    && chown -R appuser:appuser /srv /ms-playwright /data \
+    # Xvfb (run as appuser) cannot create its socket directory itself.
+    && mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
 USER appuser
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
     CMD curl -fsS http://localhost:8000/health || exit 1
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
+# One process: live sign-in sessions are held in memory by the process that
+# opened them. Uvicorn's event loop serves many requests concurrently anyway.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--proxy-headers", "--forwarded-allow-ips", "*"]

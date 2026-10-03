@@ -150,3 +150,18 @@ def sdb(sync_engine):  # type: ignore[no-untyped-def]
         if transaction.is_active:
             transaction.rollback()
         connection.close()
+
+
+# ── no real network in tests ─────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _fake_proxy_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Adding a proxy measures its real exit; tests get a harmless, unlabelled one."""
+    from app.linkedin import proxy as proxy_mod
+
+    async def fake(url: str) -> proxy_mod.ExitProbe:
+        _ = url
+        return proxy_mod.ExitProbe(ok=True, ip="203.0.113.7", org="AS64500 Home Broadband")
+
+    monkeypatch.setattr(proxy_mod, "probe_exit", fake)

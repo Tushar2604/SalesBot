@@ -2,8 +2,10 @@
 
 /** Leads: lists, the lead table, and the workspace blocklist. */
 
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { ApiError } from "@/lib/api";
+import { IconSparkle } from "@/components/app/icons";
 import {
   leadsApi,
   type BlocklistEntry,
@@ -80,9 +82,14 @@ export default function LeadsPage() {
             loses a customer.
           </p>
         </div>
-        <button className="btn-primary shrink-0" onClick={() => setImporting(true)}>
-          Add leads
-        </button>
+        <div className="flex shrink-0 gap-2">
+          <Link href="/leads/find" className="btn-ghost">
+            <IconSparkle className="h-4 w-4 text-violet-600" /> Find with AI
+          </Link>
+          <button className="btn-primary" onClick={() => setImporting(true)}>
+            Add leads
+          </button>
+        </div>
       </header>
 
       {error && (

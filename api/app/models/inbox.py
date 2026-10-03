@@ -124,6 +124,9 @@ class Conversation(UUIDPrimaryKey, Timestamps, Base):
     # Draft mode: the reply the bot proposes, waiting for a person to send it.
     bot_draft: Mapped[str] = mapped_column(Text, nullable=False, default="")
     bot_draft_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Auto mode: when `bot_draft` is due to go out. Null when nothing is
+    # scheduled. Also what spaces one thread's reply from another's.
+    bot_send_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Facts the prospect shared (email, phone, availability, ...), accumulated.
     bot_extracted: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
 

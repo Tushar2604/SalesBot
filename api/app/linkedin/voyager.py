@@ -31,6 +31,7 @@ from app.linkedin.driver import (
     ChallengeContext,
     ConnectionStatus,
     ConversationSnapshot,
+    FeedPost,
     MessageEvent,
     ProfileSnapshot,
     SearchPage,
@@ -57,6 +58,7 @@ class _EP:
     CONVERSATIONS = f"{API}/messaging/conversations"
     SEARCH_BLENDED = f"{API}/search/blended"
     FEED = f"{API}/feed/updatesV2"
+    REACTIONS = f"{API}/voyagerSocialDashReactions"
     # Dedicated, cheap endpoint for "are we connected yet". Unlike fetching the
     # whole profile it does not register a profile view, so acceptance polling
     # does not spend the account's view budget or notify the prospect again.
@@ -592,7 +594,7 @@ class MobileVoyagerDriver:
         )
 
     def list_conversations(
-        self, limit: int = 20
+        self, limit: int = 20, known: dict[str, str] | None = None
     ) -> tuple[Classification, list[ConversationSnapshot]]:
         """Recent threads. This is what reply detection polls.
 
@@ -762,6 +764,18 @@ class MobileVoyagerDriver:
             payload=payload or {},
         )
 
+    def like_post(self, post_urn: str) -> ActionResult:
+        """Reacts to a feed update with LIKE."""
+        urn = post_urn.strip()
+        classification, payload, _ = self._request(
+            "POST",
+            _EP.REACTIONS,
+            params={"action": "createOrUpdate"},
+            json={"reaction": {"reactionType": "LIKE"}, "rootUrn": urn},
+            headers={"Content-Type": "application/json"},
+        )
+        return ActionResult(classification=classification, remote_id=urn, payload=payload or {})
+
     def warm_session(self) -> Classification:
         """Read the feed the way an opening app would.
 
@@ -772,6 +786,48 @@ class MobileVoyagerDriver:
             "GET", _EP.FEED, params={"count": 10, "q": "chronFeed"}
         )
         return classification
+
+    def get_feed(self, count: int = 10, start: int = 0) -> tuple[Classification, list[FeedPost]]:
+        """A page of the home feed. Best-effort: the update shape is a deep,
+        frequently-reshuffled union type, so only what can be read confidently
+        is filled in; the rest is left in `raw` for later use."""
+        classification, payload, _ = self._request(
+            "GET", _EP.FEED, params={"count": count, "start": start, "q": "chronFeed"}
+        )
+        if not classification.ok or payload is None:
+            return classification, []
+
+        posts: list[FeedPost] = []
+        for element in payload.get("elements", []) or []:
+            actor = (
+                element.get("actor")
+                or (element.get("commentary") or {}).get("actor")
+                or {}
+            )
+            name = ((actor.get("name") or {}).get("text") or "").strip()
+            headline = ((actor.get("description") or {}).get("text") or "").strip()
+            avatar = actor.get("image") or {}
+            commentary = element.get("commentary") or {}
+            text = ((commentary.get("text") or {}).get("text") or "").strip()
+            social = element.get("socialDetail") or {}
+            counts = social.get("totalSocialActivityCounts") or {}
+            urn = str(element.get("entityUrn") or element.get("urn") or "")
+            if not urn:
+                continue
+            posts.append(
+                FeedPost(
+                    urn=urn,
+                    author_name=name,
+                    author_headline=headline,
+                    author_avatar_url=str(avatar.get("url", "")),
+                    text=text[:3000],
+                    liked=bool((social.get("likedByCurrentUser")) or False),
+                    like_count=int(counts.get("numLikes") or 0),
+                    comment_count=int(counts.get("numComments") or 0),
+                    raw=element,
+                )
+            )
+        return classification, posts
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 

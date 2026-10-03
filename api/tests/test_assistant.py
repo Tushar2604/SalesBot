@@ -131,14 +131,19 @@ def test_off_mode_never_calls_claude(monkeypatch, sdb: Session, scheduled) -> No
     assert calls == [] and scheduled == []
 
 
-def test_paused_thread_is_left_alone(monkeypatch, sdb: Session, scheduled) -> None:
+def test_paused_thread_gets_a_draft_but_nothing_is_sent(
+    monkeypatch, sdb: Session, scheduled
+) -> None:
     workspace, convo, _ = thread(sdb)
     set_mode(sdb, workspace, "auto")
     convo.bot_paused = True
-    calls = decide_returns(monkeypatch, REPLY)
+    decide_returns(monkeypatch, REPLY)
     with _bind_session_scope(monkeypatch, bot, sdb):
-        bot.respond(str(convo.id))
-    assert calls == [] and scheduled == []
+        result = bot.respond(str(convo.id))
+    assert result["action"] == "draft"
+    assert scheduled == []
+    sdb.refresh(convo)
+    assert convo.bot_draft == REPLY.reply and convo.bot_send_at is None
 
 
 def test_a_person_typing_defers_the_bot(monkeypatch, sdb: Session, scheduled) -> None:
@@ -194,7 +199,69 @@ def test_auto_mode_schedules_the_send_after_a_pause(monkeypatch, sdb: Session, s
     assert [name for name, _ in scheduled] == ["send"]
     kw = scheduled[0][1]
     assert kw["args"] == [str(convo.id), REPLY.reply, str(last.id)]
-    assert before + timedelta(minutes=2) <= kw["eta"] <= before + timedelta(minutes=3, seconds=5)
+    # The random 2-3 minute wait counts from when the prospect wrote, never
+    # sooner than 45 seconds from now.
+    floor = before + timedelta(seconds=45)
+    low = max(last.sent_at + timedelta(minutes=2), floor)
+    high = max(last.sent_at + timedelta(minutes=3), floor) + timedelta(seconds=5)
+    assert low - timedelta(seconds=1) <= kw["eta"] <= high
+
+
+class _Planned:
+    """Stands in for the session in `_send_at`: the latest reply already
+    scheduled in another thread of this account (None when there is none)."""
+
+    def __init__(self, planned: datetime | None = None) -> None:
+        self.planned = planned
+
+    def scalar(self, _statement: object) -> datetime | None:
+        return self.planned
+
+
+_FIXED_WAIT = {"reply_delay_min_minutes": 5, "reply_delay_max_minutes": 5, "working_hours_only": False}
+
+
+def test_the_reply_wait_counts_from_when_they_wrote() -> None:
+    from app.models.linkedin import LinkedInAccount
+
+    now = datetime.now(UTC)
+    account = LinkedInAccount(timezone="UTC")
+    convo = Conversation()
+
+    def send_at(received: datetime) -> datetime:
+        return bot._send_at(_Planned(), convo, account, _FIXED_WAIT, now, received)  # type: ignore[arg-type]
+
+    # Noticed 3 minutes late: the reply goes 5 minutes after they wrote, not 8.
+    assert send_at(now - timedelta(minutes=3)) == now + timedelta(minutes=2)
+    # Noticed after the wait already passed: shortly, not instantly.
+    assert send_at(now - timedelta(minutes=30)) == now + timedelta(seconds=45)
+
+
+def test_replies_in_different_threads_go_out_minutes_apart(monkeypatch) -> None:
+    """Five people answering at once must not get five replies at once."""
+    from app.models.linkedin import LinkedInAccount
+
+    now = datetime.now(UTC)
+    account = LinkedInAccount(timezone="UTC")
+    other_thread_reply = now + timedelta(minutes=4)
+    monkeypatch.setattr(bot.pacing, "sample_gap_seconds", lambda *_a, **_k: 200)
+
+    when = bot._send_at(
+        _Planned(other_thread_reply), Conversation(), account, _FIXED_WAIT, now, now  # type: ignore[arg-type]
+    )
+    assert when == other_thread_reply + timedelta(seconds=200)
+
+
+def test_a_reply_waits_for_the_accounts_next_allowed_action() -> None:
+    """A bot reply obeys the same per-account gap as every campaign action."""
+    from app.models.linkedin import LinkedInAccount
+
+    now = datetime.now(UTC)
+    account = LinkedInAccount(timezone="UTC", next_allowed_at=now + timedelta(minutes=20))
+
+    when = bot._send_at(_Planned(), Conversation(), account, _FIXED_WAIT, now, now)  # type: ignore[arg-type]
+    assert account.next_allowed_at + timedelta(seconds=5) <= when
+    assert when <= account.next_allowed_at + timedelta(seconds=45)
 
 
 def test_handoff_pauses_the_thread_with_the_reason(monkeypatch, sdb: Session, scheduled) -> None:
@@ -214,7 +281,7 @@ def test_handoff_pauses_the_thread_with_the_reason(monkeypatch, sdb: Session, sc
     assert scheduled == []
 
 
-def test_thread_reply_limit_pauses_instead_of_replying(
+def test_thread_reply_limit_drafts_and_pauses_instead_of_sending(
     monkeypatch, sdb: Session, scheduled
 ) -> None:
     workspace, convo, _ = thread(sdb)
@@ -230,12 +297,159 @@ def test_thread_reply_limit_pauses_instead_of_replying(
         )
     )
     sdb.flush()
-    calls = decide_returns(monkeypatch, REPLY)
+    decide_returns(monkeypatch, REPLY)
     with _bind_session_scope(monkeypatch, bot, sdb):
         bot.respond(str(convo.id))
-    assert calls == []
+    assert scheduled == []
     sdb.refresh(convo)
     assert convo.bot_paused is True
+    assert convo.bot_draft == REPLY.reply
+
+
+def test_a_requested_draft_ignores_the_gates_and_never_sends(
+    monkeypatch, sdb: Session, scheduled
+) -> None:
+    """Asked for from the inbox: works with the assistant off, while typing,
+    and in auto mode still only proposes."""
+    workspace, convo, _ = thread(sdb)
+    set_mode(sdb, workspace, "off")
+    convo.human_active_until = datetime.now(UTC) + timedelta(seconds=60)
+    decide_returns(monkeypatch, REPLY)
+    with _bind_session_scope(monkeypatch, bot, sdb):
+        result = bot.respond(str(convo.id), force=True)
+    assert result["action"] == "draft" and scheduled == []
+    sdb.refresh(convo)
+    assert convo.bot_draft == REPLY.reply and convo.bot_draft_at is not None
+
+    set_mode(sdb, workspace, "auto")
+    convo.human_active_until = None
+    with _bind_session_scope(monkeypatch, bot, sdb):
+        bot.respond(str(convo.id), force=True)
+    assert scheduled == []
+
+
+def test_a_requested_draft_when_we_spoke_last_is_a_follow_up(
+    monkeypatch, sdb: Session, scheduled
+) -> None:
+    workspace, convo, _ = thread(sdb, inbound_last=False)
+    set_mode(sdb, workspace, "draft")
+    seen: list[bool] = []
+
+    def fake(*_a: Any, **kw: Any) -> ai.BotDecision:
+        seen.append(kw["follow_up"])
+        return REPLY
+
+    monkeypatch.setattr(bot.ai, "decide", fake)
+    with _bind_session_scope(monkeypatch, bot, sdb):
+        bot.respond(str(convo.id), force=True)
+    assert seen == [True]
+    sdb.refresh(convo)
+    assert convo.bot_draft == REPLY.reply
+
+
+def test_a_backfilled_draft_is_never_sent_automatically(
+    monkeypatch, sdb: Session, scheduled
+) -> None:
+    workspace, convo, _ = thread(sdb)
+    set_mode(sdb, workspace, "auto")
+    decide_returns(monkeypatch, REPLY)
+    with _bind_session_scope(monkeypatch, bot, sdb):
+        result = bot.respond(str(convo.id), False, True)
+    assert result["action"] == "draft" and scheduled == []
+
+
+def test_no_reply_marks_the_message_handled(monkeypatch, sdb: Session, scheduled) -> None:
+    """So the inbox sweep does not send the same thread to the model again."""
+    workspace, convo, _ = thread(sdb)
+    set_mode(sdb, workspace, "draft")
+    decide_returns(
+        monkeypatch,
+        ai.BotDecision(action="no_reply", reply="", handoff_reason="", shared_facts=[]),
+    )
+    with _bind_session_scope(monkeypatch, bot, sdb):
+        bot.respond(str(convo.id))
+    sdb.refresh(convo)
+    assert convo.bot_draft_at is not None
+
+
+# ── SOPs attached to accounts ────────────────────────────────────────────────
+
+
+def test_replies_use_the_sops_of_the_threads_account(
+    monkeypatch, sdb: Session, scheduled
+) -> None:
+    from app.models.assistant import KnowledgeItem
+
+    workspace, convo, _ = thread(sdb)
+    set_mode(sdb, workspace, "draft")
+    other = make_account(sdb, workspace)
+    sdb.add_all(
+        [
+            KnowledgeItem(workspace_id=workspace.id, title="Everyone", content="shared"),
+            KnowledgeItem(
+                workspace_id=workspace.id,
+                title="This account",
+                content="mine",
+                linkedin_account_ids=[convo.linkedin_account_id],
+            ),
+            KnowledgeItem(
+                workspace_id=workspace.id,
+                title="Other account",
+                content="theirs",
+                linkedin_account_ids=[other.id],
+            ),
+            KnowledgeItem(
+                workspace_id=workspace.id,
+                title="Switched off",
+                content="off",
+                enabled=False,
+                linkedin_account_ids=[convo.linkedin_account_id],
+            ),
+        ]
+    )
+    sdb.flush()
+    seen: list[list[str]] = []
+
+    def fake(_config: Any, knowledge: list[ai.KnowledgeDoc], *_a: Any, **_k: Any) -> ai.BotDecision:
+        seen.append(sorted(doc.title for doc in knowledge))
+        return REPLY
+
+    monkeypatch.setattr(bot.ai, "decide", fake)
+    with _bind_session_scope(monkeypatch, bot, sdb):
+        bot.respond(str(convo.id))
+    assert seen == [["Everyone", "This account"]]
+
+
+def test_sops_are_in_the_system_prompt_as_procedures() -> None:
+    prompt = ai._system_prompt(
+        ai.AssistantConfig("", "", ""), [ai.KnowledgeDoc("Pricing SOP", "Starter plan is $49/mo")]
+    )
+    assert "Starter plan is $49/mo" in prompt
+    assert "standard operating procedures" in prompt
+
+
+# ── inbox sweep: older threads without a draft ───────────────────────────────
+
+
+def test_sweep_finds_unanswered_threads_without_a_draft(monkeypatch, sdb: Session) -> None:
+    workspace, convo, last = thread(sdb)
+    set_mode(sdb, workspace, "draft")
+    convo.last_message_from_me = False
+    convo.last_message_at = last.sent_at
+    sdb.flush()
+    monkeypatch.setattr(sync_tasks.ai, "available_providers", lambda: ["openai"])
+    account = sdb.get(bot.LinkedInAccount, convo.linkedin_account_id)
+    now = datetime.now(UTC)
+
+    assert sync_tasks._threads_needing_a_draft(sdb, account, now) == {str(convo.id)}
+
+    convo.bot_draft_at = now  # decided for this message already
+    sdb.flush()
+    assert sync_tasks._threads_needing_a_draft(sdb, account, now) == set()
+
+    convo.bot_draft_at = None
+    set_mode(sdb, workspace, "off")
+    assert sync_tasks._threads_needing_a_draft(sdb, account, now) == set()
 
 
 # ── send: last-moment checks ─────────────────────────────────────────────────

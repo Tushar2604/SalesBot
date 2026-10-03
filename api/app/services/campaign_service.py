@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ConflictError, NotFoundError, ValidationFailedError
 from app.deps import WorkspaceContext
+from app.integrations import events as integration_events
 from app.models.campaigns import (
     ActionTask,
     Campaign,
@@ -33,8 +34,25 @@ from app.models.campaigns import (
 )
 from app.models.leads import ContactedLead, Lead
 from app.models.linkedin import LinkedInAccount, LinkedInAccountStatus
-from app.scheduler import engine, templating
+from app.scheduler import engine, pacing, templating
 from app.services import audit, lead_service, tracking
+
+
+def _stagger_starts(campaign: Campaign, enrollments: list[CampaignLead], now: datetime) -> None:
+    """Spaces out when each lead enters the sequence: the first at once, each
+    next one a random few minutes after the previous.
+
+    With everyone starting at the same instant, the queue would work through
+    step 1 for every lead before step 2 for anyone. Staggered, the campaign
+    runs as a pipeline — view A, a few minutes later view B, then invite A —
+    which is how a person works a list.
+    """
+    first_step = campaign.steps[0] if campaign.steps else None
+    base = engine.step_due_at(first_step, now) if first_step else now
+    for enrollment, offset in zip(
+        enrollments, pacing.pipeline_start_offsets(len(enrollments)), strict=True
+    ):
+        enrollment.next_run_at = base + offset
 
 # Steps that need a non-empty template.
 NEEDS_TEMPLATE = {StepType.MESSAGE}
@@ -96,10 +114,20 @@ def validate_steps(specs: list[StepSpec]) -> list[str]:
 
         if spec.delay_hours < 0:
             problems.append(f"{label}: delay cannot be negative")
+        if spec.timing == "asap":
+            problems.append(
+                f"{label}: ASAP timing is no longer allowed — it is the automation signal "
+                "LinkedIn's detection looks for. Use Smart or a wait of at least 30 minutes."
+            )
         if spec.timing == "at" and spec.send_at is None:
             problems.append(f"{label}: pick the date and time to send")
-        if spec.timing == "delay" and spec.delay_minutes is None:
-            problems.append(f"{label}: enter how long to wait")
+        if spec.timing == "delay":
+            if spec.delay_minutes is None:
+                problems.append(f"{label}: enter how long to wait")
+            elif spec.delay_minutes < 30:
+                problems.append(
+                    f"{label}: waits under 30 minutes look automated and are not allowed"
+                )
 
         if spec.step_type in NEEDS_TEMPLATE and not spec.template.strip():
             problems.append(f"{label}: needs a message")
@@ -288,7 +316,12 @@ async def enroll_leads(
     This is where the workspace-wide dedupe bites: a lead already contacted by
     *any* account in this workspace is not enrolled, because "your colleague
     already messaged them" is the complaint that loses the customer.
+
+    With the workspace's testing switch on (`allow_recontact`), that dedupe is
+    lifted and a lead whose run in this campaign has finished is enrolled
+    afresh, so the same test profiles can go through a sequence repeatedly.
     """
+    recontact = ctx.workspace.allow_recontact
     conditions = [Lead.workspace_id == ctx.workspace_id]
     if lead_ids:
         conditions.append(Lead.id.in_(lead_ids))
@@ -303,7 +336,7 @@ async def enroll_leads(
 
     blocklist = await lead_service.load_blocklist(db, ctx.workspace_id)
 
-    contacted = {
+    contacted = set() if recontact else {
         value.lower()
         for value in (
             await db.execute(
@@ -315,24 +348,28 @@ async def enroll_leads(
         .scalars()
         .all()
     }
-    already = set(
-        (
-            await db.execute(
-                select(CampaignLead.lead_id).where(CampaignLead.campaign_id == campaign.id)
-            )
-        )
-        .scalars()
-        .all()
-    )
+    existing = {
+        e.lead_id: e
+        for e in (
+            await db.execute(select(CampaignLead).where(CampaignLead.campaign_id == campaign.id))
+        ).scalars()
+    }
 
     report = EnrollReport()
     first_step = campaign.steps[0] if campaign.steps else None
     now = datetime.now(UTC)
+    new_enrollments: list[CampaignLead] = []
 
     for lead in leads:
-        if lead.id in already:
-            report.skipped_already_enrolled += 1
-            continue
+        previous = existing.get(lead.id)
+        if previous is not None:
+            if not (recontact and previous.state.is_terminal):
+                report.skipped_already_enrolled += 1
+                continue
+            # Testing: replace the finished run with a fresh one. A new row
+            # means new idempotency keys, so every step really runs again.
+            await db.delete(previous)
+            await db.flush()
         if not lead.public_id:
             report.skipped_no_profile += 1
             continue
@@ -360,7 +397,12 @@ async def enroll_leads(
         await db.flush()
         enrollment.variant = templating.assign_variant(enrollment.id)
         tracking.log_event(enrollment, EventType.ENROLLED, at=now)
+        new_enrollments.append(enrollment)
         report.enrolled += 1
+
+    # A draft campaign is restaggered at launch; one already running starts
+    # working down these new leads right away.
+    _stagger_starts(campaign, new_enrollments, now)
 
     await audit.record(
         db,
@@ -376,6 +418,21 @@ async def enroll_leads(
             "skipped_already_enrolled": report.skipped_already_enrolled,
         },
     )
+    if report.enrolled:
+        await integration_events.emit(
+            db,
+            ctx.workspace_id,
+            "campaign.leads_enrolled",
+            {
+                "campaign_id": str(campaign.id),
+                "name": campaign.name,
+                "enrolled": report.enrolled,
+                "skipped": report.skipped_duplicate
+                + report.skipped_blocked
+                + report.skipped_already_enrolled
+                + report.skipped_no_profile,
+            },
+        )
     return report
 
 
@@ -383,6 +440,7 @@ async def set_status(
     db: AsyncSession, ctx: WorkspaceContext, campaign: Campaign, status: CampaignStatus
 ) -> Campaign:
     """Launch, pause, or archive. Launching has preconditions."""
+    previous = campaign.status
     if status is CampaignStatus.RUNNING:
         if not campaign.steps:
             raise ValidationFailedError("add at least one step before launching")
@@ -403,12 +461,42 @@ async def set_status(
         if not enrolled:
             raise ValidationFailedError("enroll some leads before launching")
 
+        now = datetime.now(UTC)
         if campaign.started_at is None:
-            campaign.started_at = datetime.now(UTC)
+            campaign.started_at = now
+
+        # Leads that have not started yet begin from this launch, one after
+        # another, not from whenever they happened to be enrolled.
+        not_started = list(
+            (
+                await db.execute(
+                    select(CampaignLead)
+                    .where(
+                        CampaignLead.campaign_id == campaign.id,
+                        CampaignLead.state == EnrollmentState.PENDING,
+                        CampaignLead.current_step_index == 0,
+                    )
+                    .order_by(CampaignLead.created_at)
+                )
+            ).scalars()
+        )
+        _stagger_starts(campaign, not_started, now)
 
     campaign.status = status
     if status is CampaignStatus.COMPLETED:
         campaign.completed_at = datetime.now(UTC)
+    if previous is not status:
+        await integration_events.emit(
+            db,
+            ctx.workspace_id,
+            "campaign.status_changed",
+            {
+                "campaign_id": str(campaign.id),
+                "name": campaign.name,
+                "status": status.value,
+                "previous_status": previous.value,
+            },
+        )
 
     await audit.record(
         db,

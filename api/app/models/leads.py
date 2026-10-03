@@ -40,6 +40,8 @@ class LeadSource(enum.StrEnum):
     SALES_NAVIGATOR = "sales_navigator"
     MANUAL = "manual"
     API = "api"
+    # Found by the AI lead finder through a people-data provider.
+    AI_SEARCH = "ai_search"
 
 
 class ImportStatus(enum.StrEnum):

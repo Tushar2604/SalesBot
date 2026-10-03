@@ -5,11 +5,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiError, type Invite, type Member, type WorkspaceRole } from "@/lib/api";
 import { hasRole, useSession } from "@/lib/session";
+import { useRiskGuard } from "@/components/RiskGuard";
 
 const ROLES: WorkspaceRole[] = ["member", "admin", "owner"];
 
 export default function TeamPage() {
   const { workspace, role, me, refresh } = useSession();
+  const { guarded } = useRiskGuard();
   const workspaceId = workspace?.id ?? null;
 
   const [members, setMembers] = useState<Member[]>([]);
@@ -85,6 +87,44 @@ export default function TeamPage() {
           >
             {workspace?.outreach_paused ? "Resume outreach" : "Pause all outreach"}
           </button>
+        </section>
+      )}
+
+      {isAdmin && (
+        <section className="card mb-6">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div className="min-w-0 flex-1">
+              <h2 className="mb-1 font-medium text-slate-900">
+                Testing mode: contact the same people again
+                {workspace?.allow_recontact && (
+                  <span className="ml-2 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800">
+                    ON
+                  </span>
+                )}
+              </h2>
+              <p className="text-sm text-slate-500">
+                Normally a person is contacted once per workspace, ever. Turn this on to run your own
+                or friendly test profiles through campaigns again and again: already-contacted leads
+                can be enrolled, and a lead whose run in a campaign has finished can be enrolled in
+                that campaign again. Turn it off before real outreach.
+              </p>
+            </div>
+            <button
+              className={workspace?.allow_recontact ? "btn-primary" : "btn-ghost"}
+              disabled={busy}
+              onClick={() =>
+                void run(async () => {
+                  const next = !workspace?.allow_recontact;
+                  const saved = await guarded((ack) =>
+                    api.updateWorkspace(workspaceId, { allow_recontact: next }, ack),
+                  );
+                  if (saved) await refresh();
+                })
+              }
+            >
+              {workspace?.allow_recontact ? "Turn off testing mode" : "Turn on testing mode"}
+            </button>
+          </div>
         </section>
       )}
 

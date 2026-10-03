@@ -11,16 +11,20 @@ from that account and must not overlap with an outbound action.
 
 from __future__ import annotations
 
+import random
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
+from app.ai import assistant as ai
 from app.config import settings
 from app.core.logging import get_logger
 from app.db import session_scope
-from app.linkedin import build_driver, health
+from app.integrations import events as integration_events
+from app.linkedin import build_driver, guard, health
+from app.linkedin import caps as caps_mod
 from app.linkedin.driver import ConnectionStatus, ConversationSnapshot
 from app.linkedin.voyager import extract_profile_id
 from app.models.campaigns import (
@@ -31,14 +35,17 @@ from app.models.campaigns import (
     ConnectionState,
     EnrollmentState,
     EventType,
+    StepCondition,
+    StepType,
     TaskStatus,
 )
 from app.models.inbox import Conversation, Message, MessageAuthor, MessageDirection
 from app.models.leads import Lead
 from app.models.linkedin import LinkedInAccount, LinkedInAccountStatus
-from app.models.tenancy import NotificationType
-from app.scheduler import dispatcher, locks, pacing
+from app.models.tenancy import NotificationType, Workspace
+from app.scheduler import dispatcher, engine, locks, pacing, quota
 from app.services import notification_service, tracking
+from app.services.assistant_service import resolve_settings
 from app.worker.celery_app import celery_app
 
 log = get_logger(__name__)
@@ -47,6 +54,9 @@ log = get_logger(__name__)
 # and polling immediately just spends requests.
 ACCEPTANCE_MIN_AGE = timedelta(minutes=settings.linkedin_acceptance_min_age_minutes)
 ACCEPTANCE_BATCH = 15
+# Chance a 10-minute sweep reads an account's inbox outside working hours:
+# about one look an hour, at irregular times.
+_OFF_HOURS_POLL_CHANCE = 1 / 6
 CONVERSATION_PAGE = 30
 
 
@@ -217,6 +227,18 @@ def _ingest_conversation(
                     )
                     .values(direction=direction)
                 )
+                # Self-heal: rows stamped in the future when the thread's day
+                # divider was misread (they sorted after newer messages).
+                if event.sent_at is not None:
+                    db.execute(
+                        update(Message)
+                        .where(
+                            Message.conversation_id == row.id,
+                            Message.remote_event_urn == event.event_urn,
+                            Message.sent_at > now + timedelta(minutes=5),
+                        )
+                        .values(sent_at=event.sent_at)
+                    )
                 continue
         elif (sent_at, direction, event.text) in known_fallback:
             continue
@@ -264,6 +286,37 @@ def _ingest_conversation(
     return inserted
 
 
+def _accepted_from_thread(
+    db: Session, enrollment: CampaignLead, conversation: ConversationSnapshot
+) -> bool:
+    """True when this thread proves a still-pending invite was accepted.
+
+    LinkedIn only opens a thread for an invite's note once the person accepts,
+    and only a connection can write back. Reading it here costs nothing extra —
+    the inbox poll already opened the thread — and spots an acceptance within
+    one poll instead of the hours between profile checks.
+    """
+    if (
+        enrollment.connection_state != ConnectionState.PENDING.value
+        or enrollment.invite_sent_at is None
+    ):
+        return False
+    if any(not event.from_me for event in conversation.events):
+        return True
+    notes = [
+        body
+        for body in db.execute(
+            select(ActionTask.payload["body"].astext).where(
+                ActionTask.campaign_lead_id == enrollment.id,
+                ActionTask.action_type == StepType.INVITE,
+                ActionTask.status == TaskStatus.SUCCEEDED,
+            )
+        ).scalars()
+        if body
+    ]
+    return any(_same_text(note, event.text) for note in notes for event in conversation.events)
+
+
 def _conversation_id(db: Session, account_id: Any, conversation_urn: str) -> str | None:
     found = db.execute(
         select(Conversation.id).where(
@@ -272,6 +325,39 @@ def _conversation_id(db: Session, account_id: Any, conversation_urn: str) -> str
         )
     ).scalar_one_or_none()
     return str(found) if found else None
+
+
+# Unanswered threads the assistant never looked at (they arrived before it was
+# switched on, while it was paused, or when a provider was down) get a
+# suggested reply too — a few per poll, so a backlog is not a burst of calls.
+_BACKFILL_PER_POLL = 10
+_BACKFILL_WINDOW = timedelta(days=30)
+
+
+def _threads_needing_a_draft(db: Session, account: LinkedInAccount, now: datetime) -> set[str]:
+    workspace = db.get(Workspace, account.workspace_id)
+    cfg = resolve_settings((workspace.settings or {}).get("assistant") if workspace else None)
+    if cfg["mode"] == "off" or not ai.available_providers():
+        return set()
+    rows = db.execute(
+        select(Conversation.id)
+        .where(
+            Conversation.linkedin_account_id == account.id,
+            Conversation.last_message_from_me.is_(False),
+            Conversation.last_message_at >= now - _BACKFILL_WINDOW,
+            Conversation.bot_draft == "",
+            Conversation.bot_send_at.is_(None),
+            # Not yet decided for its latest message.
+            or_(
+                Conversation.bot_draft_at.is_(None),
+                Conversation.bot_draft_at < Conversation.last_message_at,
+            ),
+            or_(Conversation.snoozed_until.is_(None), Conversation.snoozed_until <= now),
+        )
+        .order_by(Conversation.last_message_at.desc())
+        .limit(_BACKFILL_PER_POLL)
+    ).scalars()
+    return {str(row) for row in rows}
 
 
 @celery_app.task(name="linkedin.sync.poll_replies", bind=True, max_retries=0)
@@ -288,12 +374,24 @@ def poll_replies(self: Any, account_id: str) -> dict[str, int]:
         if not account.is_connected:
             return {"stopped": 0, "skipped": 1}
 
+        # What this inbox already holds, so threads read elsewhere (phone,
+        # Chrome) are still picked up when their last message changed.
+        known = {
+            (name or "").strip().lower(): text or ""
+            for name, text in db.execute(
+                select(Conversation.participant_name, Conversation.last_message_text).where(
+                    Conversation.linkedin_account_id == account.id
+                )
+            ).all()
+            if name
+        }
+
         try:
             with locks.account_slot(account.id):
                 driver = build_driver(account)
                 try:
                     classification, conversations = driver.list_conversations(
-                        limit=CONVERSATION_PAGE
+                        limit=CONVERSATION_PAGE, known=known
                     )
                 finally:
                     driver.close()
@@ -344,6 +442,22 @@ def poll_replies(self: Any, account_id: str) -> dict[str, int]:
             enrollments = index.get(key, [])
             campaign_lead = enrollments[0] if enrollments else None
             inserted = _ingest_conversation(db, account, conversation, lead, campaign_lead, now)
+            for enrollment in enrollments:
+                if _accepted_from_thread(db, enrollment, conversation):
+                    if (
+                        _resolve_invite(db, enrollment, ConnectionStatus.CONNECTED, now)
+                        == "accepted"
+                    ):
+                        _emit_accepted(db, enrollment, now)
+                    who = conversation.participant_name or "A prospect"
+                    notification_service.create_sync(
+                        db,
+                        account.workspace_id,
+                        NotificationType.INVITE_UPDATE,
+                        f"{who} accepted your connection request",
+                        body="Seen in the inbox",
+                        link="/campaigns",
+                    )
             new_inbound = [m for m in inserted if m.direction is MessageDirection.INBOUND]
             new_inbound_message_ids.extend(m.id for m in new_inbound)
             conversations_to_answer.update(str(m.conversation_id) for m in new_inbound)
@@ -358,6 +472,24 @@ def poll_replies(self: Any, account_id: str) -> dict[str, int]:
                     body=new_inbound[-1].body[:180],
                     link=f"/inbox?conversation={new_inbound[-1].conversation_id}",
                 )
+                for message in new_inbound:
+                    integration_events.emit_sync(
+                        db,
+                        account.workspace_id,
+                        "reply.received",
+                        {
+                            "conversation_id": str(message.conversation_id),
+                            "message_id": str(message.id),
+                            "text": message.body,
+                            "received_at": message.sent_at.isoformat(),
+                            "from_name": conversation.participant_name,
+                            "lead": integration_events.lead_data(lead),
+                            "campaign_id": str(campaign_lead.campaign_id)
+                            if campaign_lead
+                            else None,
+                            "account": integration_events.account_data(account),
+                        },
+                    )
 
             # Only inbound messages count. Our own last message is not a reply.
             if conversation.last_message_from_me:
@@ -384,6 +516,11 @@ def poll_replies(self: Any, account_id: str) -> dict[str, int]:
                         campaign_id=str(enrollment.campaign_id),
                     )
 
+        db.flush()
+        conversations_to_backfill = _threads_needing_a_draft(db, account, now) - (
+            conversations_to_answer | conversations_to_follow_up
+        )
+
         # No pacing reset here: reading the inbox is not an action, and pushing the
         # next-allowed time out every poll starved real actions (an invite never got
         # its turn). The account's single slot already stops a poll overlapping one.
@@ -398,6 +535,9 @@ def poll_replies(self: Any, account_id: str) -> dict[str, int]:
     # was already suggested for the latest message.
     for conversation_id in conversations_to_follow_up - conversations_to_answer:
         celery_app.send_task("assistant.respond", args=[conversation_id, True], queue="ai")
+    # Older threads: a suggestion only, never an automatic send out of the blue.
+    for conversation_id in conversations_to_backfill:
+        celery_app.send_task("assistant.respond", args=[conversation_id, False, True], queue="ai")
 
     return {"stopped": stopped, "conversations": len(conversations)}
 
@@ -418,6 +558,26 @@ def _previous_observation(db: Session, enrollment_id: Any) -> str:
 
 def _days(n: int) -> str:
     return f"{n} day" if n == 1 else f"{n} days"
+
+
+def _emit_accepted(db: Session, enrollment: CampaignLead, now: datetime) -> None:
+    """The invite.accepted webhook event, for callers that saw _resolve_invite
+    return "accepted"."""
+    invited_at = enrollment.invite_sent_at or now
+    integration_events.emit_sync(
+        db,
+        enrollment.workspace_id,
+        "invite.accepted",
+        {
+            "at": now.isoformat(),
+            "days_waited": tracking.days_between(invited_at, now) or 0,
+            "campaign_id": str(enrollment.campaign_id),
+            "lead": integration_events.lead_data(db.get(Lead, enrollment.lead_id)),
+            "account": integration_events.account_data(
+                db.get(LinkedInAccount, enrollment.linkedin_account_id)
+            ),
+        },
+    )
 
 
 def _resolve_invite(
@@ -446,10 +606,16 @@ def _resolve_invite(
             at=now,
             meta={"days_waited": waited},
         )
-        # A step gated on `if_accepted` may now be eligible, so wake the enrollment
-        # now rather than at its next scheduled look.
+        # A step gated on `if_accepted` may now be eligible. Its wait counts
+        # from the acceptance ("message 12 minutes after they accept"), not
+        # from the invite: a late detection must not fire it the same instant.
         if not enrollment.state.is_terminal:
-            enrollment.next_run_at = now
+            campaign = db.get(Campaign, enrollment.campaign_id)
+            step = engine._step_at(campaign, enrollment.current_step_index) if campaign else None
+            if step is not None and step.only_if is StepCondition.IF_ACCEPTED:
+                enrollment.next_run_at = engine.step_due_at(step, now)
+            else:
+                enrollment.next_run_at = now
         return "accepted"
 
     if status is ConnectionStatus.UNKNOWN:
@@ -526,6 +692,9 @@ def check_acceptances(self: Any, account_id: str) -> dict[str, int]:
             return counts
         if not account.is_connected:
             return counts
+        # Each check is a profile visit: those belong in working hours only.
+        if not caps_mod.within_working_hours(account, now=now)[0]:
+            return counts
 
         pending = list(
             db.execute(
@@ -575,6 +744,7 @@ def check_acceptances(self: Any, account_id: str) -> dict[str, int]:
                         changed = _resolve_invite(db, enrollment, status, now)
                         db.flush()
                         if changed == "accepted":
+                            _emit_accepted(db, enrollment, now)
                             counts["accepted"] += 1
                             who = lead.full_name or lead.public_id
                             notification_service.create_sync(
@@ -617,29 +787,40 @@ def poll_all() -> dict[str, int]:
 
     Offsets are staggered: a thousand accounts calling LinkedIn in the same
     second is a pattern in itself, regardless of per-account pacing.
-    """
-    with session_scope() as db:
-        account_ids = [
-            str(account_id)
-            for account_id in db.execute(
-                select(LinkedInAccount.id).where(
-                    LinkedInAccount.status == LinkedInAccountStatus.ACTIVE,
-                    LinkedInAccount.session_ciphertext.isnot(None),
-                )
-            ).scalars()
-        ]
 
-    if not account_ids:
+    Reading follows the account's own day: every sweep during working hours,
+    roughly hourly (at random) on evenings and weekends, and never at night.
+    Acceptance checks are profile visits, so they only happen in working hours.
+    """
+    now = datetime.now(UTC)
+    plan: list[tuple[str, bool]] = []  # (account id, also check acceptances)
+    with session_scope() as db:
+        accounts = db.execute(
+            select(LinkedInAccount).where(
+                LinkedInAccount.status == LinkedInAccountStatus.ACTIVE,
+                LinkedInAccount.session_ciphertext.isnot(None),
+            )
+        ).scalars()
+        for account in accounts:
+            cadence = caps_mod.background_cadence(account, now=now)
+            if cadence == "asleep":
+                continue
+            if cadence == "light" and random.random() >= _OFF_HOURS_POLL_CHANCE:  # noqa: S311
+                continue
+            plan.append((str(account.id), cadence == "active"))
+
+    if not plan:
         return {"queued": 0}
 
-    offsets = pacing.spread_start_times(len(account_ids), window_seconds=240)
-    for account_id, offset in zip(account_ids, offsets, strict=True):
+    offsets = pacing.spread_start_times(len(plan), window_seconds=240)
+    for (account_id, acceptances), offset in zip(plan, offsets, strict=True):
         poll_replies.apply_async(args=[account_id], countdown=offset, queue="linkedin.sync")
-        check_acceptances.apply_async(
-            args=[account_id], countdown=offset + 30, queue="linkedin.sync"
-        )
+        if acceptances:
+            check_acceptances.apply_async(
+                args=[account_id], countdown=offset + 30, queue="linkedin.sync"
+            )
 
-    return {"queued": len(account_ids)}
+    return {"queued": len(plan)}
 
 
 def deliver_text(db: Session, conversation: Conversation, text: str, author: str) -> dict[str, Any]:
@@ -667,6 +848,9 @@ def deliver_text(db: Session, conversation: Conversation, text: str, author: str
                 driver.close()
     except locks.SlotBusy:
         return {"ok": False, "reason": "account busy"}
+    except guard.TooSoon as too_soon:
+        # Nothing was sent: the account acted too recently.
+        return {"ok": False, "reason": "action gap", "retry_at": too_soon.retry_at.isoformat()}
 
     health.apply_classification(account, result.classification, now=now)
     if not result.classification.ok:
@@ -691,16 +875,59 @@ def deliver_text(db: Session, conversation: Conversation, text: str, author: str
     conversation.last_message_from_me = True
     conversation.bot_draft = ""
     conversation.bot_draft_at = None
-    account.next_allowed_at = pacing.next_allowed_at(now)
+    conversation.bot_send_at = None
+    # The gap to the account's next action was set by the guard when it
+    # cleared this send (app/linkedin/guard.py).
+    # Inbox messages share the daily message budget with campaigns, so the
+    # dispatcher sends fewer campaign messages on a busy inbox day.
+    quota.consume(db, account, StepType.MESSAGE, now=now)
+    integration_events.emit_sync(
+        db,
+        conversation.workspace_id,
+        "message.sent",
+        {
+            "at": now.isoformat(),
+            "conversation_id": str(conversation.id),
+            "text": text,
+            # "human" (typed in the inbox) or "bot" (the AI assistant).
+            "source": "assistant" if author == MessageAuthor.BOT.value else "inbox",
+            "lead": integration_events.lead_data(lead),
+            "campaign_id": None,
+            "account": integration_events.account_data(account),
+        },
+    )
     return {"ok": True}
 
 
+# A reply held back by the action gap or a busy account is tried again this
+# many times (each after its wait) before it is reported as not sent.
+_REPLY_ATTEMPTS = 12
+
+
 @celery_app.task(name="linkedin.action.send_reply", bind=True, max_retries=2)
-def send_reply(self: Any, conversation_id: str, text: str, author: str = "human") -> dict[str, Any]:
-    """Sends a reply from the inbox: one a person wrote, or an approved draft."""
+def send_reply(
+    self: Any, conversation_id: str, text: str, author: str = "human", attempt: int = 1
+) -> dict[str, Any]:
+    """Sends a reply from the inbox: one a person wrote, or an approved draft.
+
+    Even a reply a person typed obeys the account's action gap: it waits
+    (usually a few minutes at most) rather than going out seconds after the
+    previous action."""
     _ = self
     with session_scope() as db:
         conversation = db.get(Conversation, conversation_id)
         if conversation is None:
             return {"ok": False, "reason": "conversation not found"}
-        return deliver_text(db, conversation, text, author)
+        result = deliver_text(db, conversation, text, author)
+    if result["ok"] or attempt >= _REPLY_ATTEMPTS:
+        return result
+    if result.get("reason") == "action gap":
+        eta = datetime.fromisoformat(result["retry_at"]) + timedelta(seconds=random.randint(5, 30))  # noqa: S311
+    elif result.get("reason") == "account busy":
+        eta = datetime.now(UTC) + timedelta(seconds=random.randint(60, 150))  # noqa: S311
+    else:
+        return result
+    send_reply.apply_async(
+        args=[conversation_id, text, author, attempt + 1], eta=eta, queue="linkedin.action"
+    )
+    return {"ok": False, "reason": result["reason"], "retry_at": eta.isoformat()}

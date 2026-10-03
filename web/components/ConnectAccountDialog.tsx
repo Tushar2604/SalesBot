@@ -3,21 +3,22 @@
 /**
  * Connect a LinkedIn account.
  *
- * Credentials is the default on purpose: it establishes a brand-new session,
- * separate from whatever the member is doing in their own browser. Pasting a
- * `li_at` cookie instead hands over the session your everyday browser is
- * actively using — LinkedIn then sees that one session suddenly making
- * requests from a server and reasonably treats it as compromised, which is
- * what signs the member out of their own browser. Cookie import is kept as a
- * fallback for headless environments where a fresh login isn't practical.
+ * Browser sign-in is the default on purpose: it establishes a brand-new
+ * session, separate from whatever the member is doing in their own browser.
+ * Pasting a `li_at` cookie instead hands over the session your everyday
+ * browser is actively using — LinkedIn then sees that one session suddenly
+ * making requests from a server and reasonably treats it as compromised,
+ * which is what signs the member out of their own browser. Cookie import is
+ * kept as a fallback for headless environments where a fresh login isn't
+ * practical.
  */
 
 import { useState } from "react";
 import { ApiError, linkedinApi, type ProxyRecord } from "@/lib/api";
-import { IconChevronDown, IconChevronLeft, IconClose, IconLinkedIn } from "@/components/app/icons";
+import { IconChevronDown, IconChevronLeft, IconClose } from "@/components/app/icons";
 import { RemoteBrowserPanel } from "@/components/RemoteBrowserPanel";
 
-type Mode = "cookie" | "credentials";
+type Mode = "cookie" | "browser";
 
 const COMMON_TIMEZONES = [
   "UTC",
@@ -52,12 +53,10 @@ export function ConnectAccountDialog({
   onClose: () => void;
   onConnected: () => void;
 }) {
-  const [mode, setMode] = useState<Mode>("credentials");
+  const [mode, setMode] = useState<Mode>("browser");
   const [label, setLabel] = useState("");
   const [liAt, setLiAt] = useState("");
   const [jsessionid, setJsessionid] = useState("");
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
   const [timezone, setTimezone] = useState(guessTimezone());
   const [proxyId, setProxyId] = useState<string>("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -83,7 +82,6 @@ export function ConnectAccountDialog({
         onConnected();
       } else {
         setRemoteBrowserOpen(true);
-        return;
       }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not start the connection");
@@ -134,12 +132,12 @@ export function ConnectAccountDialog({
           <div className="mb-5 flex gap-2 rounded-lg border border-slate-200 bg-slate-50 p-1">
             <button
               type="button"
-              onClick={() => setMode("credentials")}
+              onClick={() => setMode("browser")}
               className={`flex-1 rounded-md px-3 py-2 text-[13px] font-semibold transition-colors ${
-                mode === "credentials" ? "bg-white text-ink-950 shadow-sm" : "text-slate-500 hover:text-ink-950"
+                mode === "browser" ? "bg-white text-ink-950 shadow-sm" : "text-slate-500 hover:text-ink-950"
               }`}
             >
-              Email &amp; password{" "}
+              Sign in with browser{" "}
               <span className="text-[10.5px] font-bold text-emerald-600">Recommended</span>
             </button>
             <button
@@ -153,11 +151,12 @@ export function ConnectAccountDialog({
             </button>
           </div>
 
-          {mode === "credentials" && (
+          {mode === "browser" && (
             <p className="mb-5 rounded-lg border border-state-ok/30 bg-state-ok/5 p-3 text-xs text-slate-600">
-              This starts a fresh LinkedIn session, separate from whatever you&apos;re signed into
-              in your own browser — it never touches your everyday session, so using it doesn&apos;t
-              put your normal LinkedIn usage at risk.
+              Opens a real, visible browser window, on this account&apos;s assigned connection, that
+              you sign into yourself. It starts a fresh LinkedIn session separate from whatever
+              you&apos;re signed into elsewhere, and you can solve any verification LinkedIn shows
+              live.
             </p>
           )}
           {mode === "cookie" && (
@@ -199,39 +198,10 @@ export function ConnectAccountDialog({
                 </div>
               </>
             ) : (
-              <>
-                <div>
-                  <label className="label" htmlFor="li-email">
-                    LinkedIn Email ID
-                  </label>
-                  <input
-                    id="li-email"
-                    type="email"
-                    className="input"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="Your LinkedIn login email ID"
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="label" htmlFor="li-password">
-                    LinkedIn password
-                  </label>
-                  <input
-                    id="li-password"
-                    type="password"
-                    className="input"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    required
-                  />
-                  <p className="mt-1.5 text-xs text-slate-500">
-                    Encrypted in transit to the worker and never stored. LinkedIn will usually ask
-                    for a verification code, which you enter on the next screen.
-                  </p>
-                </div>
-              </>
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-xs text-slate-500">
+                Nothing to fill in here — set a label or proxy below if you want, then hit Connect
+                and a real browser window opens for you to sign in directly.
+              </div>
             )}
 
             <label className="flex items-center gap-2.5 text-[13.5px] font-medium text-slate-700">
@@ -326,21 +296,6 @@ export function ConnectAccountDialog({
                   </div>
                 </div>
               )}
-            </div>
-
-            <div>
-              <button
-                type="button"
-                onClick={() => setRemoteBrowserOpen(true)}
-                className="flex w-fit items-center gap-2 rounded-lg border border-slate-200 px-4 py-2.5 text-[13px] font-semibold text-slate-600 hover:border-slate-300 hover:text-ink-950"
-              >
-                <IconLinkedIn className="h-4 w-4" />
-                Sign in with browser
-              </button>
-              <p className="mt-1.5 text-xs text-slate-500">
-                Recommended if the form above gets blocked — opens a real, visible browser you
-                drive yourself, so you can solve any verification LinkedIn shows live.
-              </p>
             </div>
 
             {error && (

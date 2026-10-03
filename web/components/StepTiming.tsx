@@ -4,11 +4,15 @@
  * "When should this step run?" — the control that lets a user decide, instead
  * of the scheduler picking a random moment for them.
  *
- * Four modes, each with its own input:
+ * Three modes, each with its own input:
  *  Smart      a natural time in working hours, after N hours/days (recommended)
- *  ASAP       the moment the account's limits allow
- *  After      an exact wait in minutes/hours/days
+ *  After      an exact wait in minutes/hours/days (minimum 30, enforced)
  *  At a time  a specific date and time
+ *
+ * There used to be a fourth mode, "ASAP" (fire the moment limits allow, no
+ * natural delay) — removed entirely, not just discouraged, because it's the
+ * clearest automation signal LinkedIn's detection looks for and the option to
+ * click through the warning is what let it keep getting used.
  *
  * Every mode still passes through the account's safety limits (working hours,
  * daily caps, spacing between actions). The note under the control says so, so
@@ -18,11 +22,12 @@
 import { describeTiming, type StepInput, type StepTiming } from "@/lib/outreach-api";
 
 const MODES: { key: StepTiming; label: string; hint: string }[] = [
-  { key: "smart", label: "Smart", hint: "Natural time" },
-  { key: "asap", label: "ASAP", hint: "Right away" },
-  { key: "delay", label: "After a wait", hint: "Exact delay" },
+  { key: "smart", label: "Smart", hint: "Natural time · safest" },
+  { key: "delay", label: "After a wait", hint: "Exact delay, 30 min minimum" },
   { key: "at", label: "Specific time", hint: "Date & time" },
 ];
+
+const MIN_DELAY_MINUTES = 30;
 
 type Unit = "minutes" | "hours" | "days";
 const UNIT_MINUTES: Record<Unit, number> = { minutes: 1, hours: 60, days: 1440 };
@@ -57,11 +62,11 @@ export function StepTiming({
   const wait = splitMinutes(step.delay_minutes ?? 0);
   const smartUnitIsDays = step.delay_hours > 0 && step.delay_hours % 24 === 0;
 
-  function setMode(next: StepTiming) {
+  async function setMode(next: StepTiming) {
     if (next === mode) return;
     onChange({
       timing: next,
-      delay_minutes: next === "delay" ? (step.delay_minutes ?? 10) : null,
+      delay_minutes: next === "delay" ? Math.max(MIN_DELAY_MINUTES, step.delay_minutes ?? MIN_DELAY_MINUTES) : null,
       send_at: next === "at" ? (step.send_at ?? null) : null,
     });
   }
@@ -80,7 +85,7 @@ export function StepTiming({
               role="radio"
               aria-checked={active}
               disabled={disabled}
-              onClick={() => setMode(m.key)}
+              onClick={() => void setMode(m.key)}
               className={`rounded-lg border px-3 py-2 text-left transition-colors disabled:cursor-not-allowed ${
                 active
                   ? "border-brand-500 bg-brand-50 ring-1 ring-brand-500"
@@ -132,27 +137,20 @@ export function StepTiming({
         </div>
       )}
 
-      {mode === "asap" && (
-        <p className="text-sm text-slate-600">
-          Runs as soon as the account is allowed to act — no random spreading.
-        </p>
-      )}
-
       {mode === "delay" && (
         <div className="flex flex-wrap items-center gap-2 text-sm text-slate-600">
           Wait exactly
           <input
             type="number"
-            min={0}
+            min={wait.unit === "minutes" ? MIN_DELAY_MINUTES : 1}
             className="input w-20 py-1"
             disabled={disabled}
             aria-label="Exact wait"
             value={wait.value}
-            onChange={(e) =>
-              onChange({
-                delay_minutes: Math.max(0, Number(e.target.value) || 0) * UNIT_MINUTES[wait.unit],
-              })
-            }
+            onChange={(e) => {
+              const raw = Math.max(0, Number(e.target.value) || 0) * UNIT_MINUTES[wait.unit];
+              onChange({ delay_minutes: Math.max(MIN_DELAY_MINUTES, raw) });
+            }}
           />
           <select
             className="input w-28 py-1"
@@ -160,14 +158,27 @@ export function StepTiming({
             aria-label="Exact wait unit"
             value={wait.unit}
             onChange={(e) =>
-              onChange({ delay_minutes: wait.value * UNIT_MINUTES[e.target.value as Unit] })
+              onChange({
+                delay_minutes: Math.max(
+                  MIN_DELAY_MINUTES,
+                  wait.value * UNIT_MINUTES[e.target.value as Unit],
+                ),
+              })
             }
           >
             <option value="minutes">minutes</option>
             <option value="hours">hours</option>
             <option value="days">days</option>
           </select>
-          {isFirst ? "after the campaign starts." : "after the previous step finishes."}
+          {isFirst
+            ? "after the campaign starts."
+            : step.only_if === "if_accepted"
+              ? "after they accept your connection request."
+              : "after the previous step finishes."}
+          <p className="w-full text-xs text-slate-400">
+            {MIN_DELAY_MINUTES} minutes minimum — shorter gaps between steps look automated and
+            are enforced, not just discouraged.
+          </p>
         </div>
       )}
 

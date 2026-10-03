@@ -94,6 +94,9 @@ export function ThreadPanel({
   onBotToggle,
   onSendDraft,
   onDiscardDraft,
+  onRequestDraft,
+  drafting = false,
+  draftNote = null,
   onTyping,
 }: {
   conversation: Conversation;
@@ -111,6 +114,11 @@ export function ThreadPanel({
   onBotToggle?: (paused: boolean) => void;
   onSendDraft?: (text: string) => void;
   onDiscardDraft?: () => void;
+  /** Ask the assistant for a (new) suggested reply from this account's SOPs. */
+  onRequestDraft?: () => void;
+  drafting?: boolean;
+  /** Why the last request produced no draft, if it didn't. */
+  draftNote?: string | null;
   onTyping?: () => void;
 }) {
   const [draft, setDraft] = useState("");
@@ -215,12 +223,33 @@ export function ThreadPanel({
         )}
       </div>
 
+      {onRequestDraft && !conversation.bot_draft && messages.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 border-t border-violet-200 bg-violet-50/40 px-4 py-2.5 text-[12.5px] text-violet-800">
+          <IconSparkle className="h-4 w-4 shrink-0" />
+          <span className="min-w-0 flex-1">
+            {drafting ? "Drafting a reply from this account's SOPs…" : draftNote || "No AI draft for this conversation yet."}
+          </span>
+          <button
+            className="rounded-md bg-violet-600 px-2.5 py-1 text-[12px] font-semibold text-white hover:bg-violet-700 disabled:opacity-50"
+            disabled={drafting}
+            onClick={onRequestDraft}
+          >
+            {drafting ? "Drafting…" : draftNote ? "Try again" : "Generate AI draft"}
+          </button>
+        </div>
+      )}
+
       {conversation.bot_draft && onSendDraft && (
         <div className="border-t border-violet-200 bg-violet-50/60 px-4 py-3">
           <p className="mb-1.5 flex items-center gap-1.5 text-[12px] font-semibold text-violet-700">
             <IconSparkle className="h-3.5 w-3.5" />
-            {assistantMode === "auto" && !conversation.bot_paused
-              ? "Assistant will send this shortly. Editing or discarding it stops that."
+            {/* Only a reply with a scheduled time goes out by itself; requested
+                and backfilled drafts are suggestions even in auto mode. */}
+            {assistantMode === "auto" && !conversation.bot_paused && conversation.bot_send_at
+              ? `Assistant will send this at ${new Date(conversation.bot_send_at).toLocaleTimeString(undefined, {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })}. Editing or discarding it stops that.`
               : "Suggested reply"}
           </p>
           <textarea
@@ -234,6 +263,11 @@ export function ThreadPanel({
             className="input mb-2 resize-none bg-white"
           />
           <div className="flex flex-wrap justify-end gap-2">
+            {onRequestDraft && (
+              <button className="btn-ghost mr-auto px-3 py-1.5 text-xs" disabled={drafting} onClick={onRequestDraft}>
+                {drafting ? "Regenerating…" : "Regenerate"}
+              </button>
+            )}
             <button className="btn-ghost px-3 py-1.5 text-xs" onClick={onDiscardDraft}>
               Discard
             </button>

@@ -121,10 +121,14 @@ class StepRequest(BaseModel):
     on_condition_fail: ConditionFailAction = ConditionFailAction.SKIP
     template: str = Field(default="", max_length=8000)
     # When the step runs. "smart" = a human-like time inside working hours (the
-    # default); "asap" = as soon as the account's limits allow; "delay" = exactly
-    # `delay_minutes` after the previous step; "at" = at `send_at`.
-    timing: Literal["smart", "asap", "delay", "at"] = "smart"
-    delay_minutes: int | None = Field(default=None, ge=0, le=60 * 24 * 60)
+    # default); "delay" = exactly `delay_minutes` after the previous step; "at" =
+    # at `send_at`. "asap" (fire the instant limits allow, no natural delay) is
+    # deliberately not accepted here: it was the clearest automation signal in
+    # this product's own history and used to be overridable with a warning,
+    # which is exactly how it kept getting chosen. Read-side (`StepResponse`)
+    # still accepts it so campaigns built before this change keep displaying.
+    timing: Literal["smart", "delay", "at"] = "smart"
+    delay_minutes: int | None = Field(default=None, ge=30, le=60 * 24 * 60)
     send_at: datetime | None = None
 
     @field_validator("template")
@@ -173,11 +177,19 @@ class CampaignCreateRequest(BaseModel):
     linkedin_account_id: uuid.UUID
     steps: list[StepRequest] = Field(min_length=1, max_length=20)
     stop_on_reply: bool = True
+    # The named assistant that answers this campaign's leads; None = default.
+    assistant_id: uuid.UUID | None = None
+    ai_brief: str = Field(default="", max_length=4000)
 
 
 class CampaignUpdateRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=160)
     stop_on_reply: bool | None = None
+    # What this campaign is about, for the AI assistant: who it targets, what
+    # is being offered, what a good next step is. Used when a lead replies.
+    ai_brief: str | None = Field(default=None, max_length=4000)
+    # Sent as null to go back to the default assistant; left out to keep it.
+    assistant_id: uuid.UUID | None = None
 
 
 class CampaignStatsResponse(BaseModel):
@@ -213,6 +225,10 @@ class CampaignResponse(BaseModel):
     created_at: datetime
     # Why the campaign cannot be launched right now, if it cannot.
     launch_blockers: list[str] = []
+    ai_brief: str = ""
+    # The named assistant answering this campaign's leads; None = default.
+    assistant_id: uuid.UUID | None = None
+    assistant_name: str = "Default assistant"
 
 
 class EnrollRequest(BaseModel):
@@ -250,6 +266,20 @@ class EnrollmentResponse(BaseModel):
     replied_at: datetime | None
     last_error: str
     stopped_reason: str
+    viewed_at: datetime | None = None
+    # "none" | "pending" | "accepted" | "not_accepted" | "expired"
+    connection_state: str = "none"
+    # The action queued for this lead right now, and when it is due.
+    next_action: StepType | None = None
+    next_action_at: datetime | None = None
+    # The LinkedIn thread with this lead, once there is one.
+    conversation_id: uuid.UUID | None = None
+    last_reply_text: str = ""
+    last_reply_at: datetime | None = None
+    # What the assistant is doing in that thread:
+    # "" | "draft_ready" | "reply_scheduled" | "bot_replied" | "needs_you" | "paused"
+    bot_status: str = ""
+    bot_send_at: datetime | None = None
 
 
 class EnrollmentPage(BaseModel):
@@ -284,6 +314,7 @@ class ActionTaskResponse(BaseModel):
     error_class: str
     error_detail: str
     lead_public_id: str = ""
+    lead_name: str = ""
 
 
 class QuotaStatusResponse(BaseModel):

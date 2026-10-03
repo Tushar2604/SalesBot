@@ -151,13 +151,22 @@ async def test_an_in_range_cap_is_clamped_by_the_ramp_curve(
     token, ws = await register(client)
     account_id = await _connect(client, token, ws, "y")
 
+    url = f"/api/v1/workspaces/{ws}/linkedin-accounts/{account_id}"
+    risky = {"daily_invites": 75, "test_mode": False}
+
+    refused = await client.patch(url, json=risky, headers=auth(token))
+    assert refused.status_code == 409
+    keys = {r["key"] for r in refused.json()["error"]["details"]["risks"]}
+    assert keys == {"daily_invites", "test_mode_early"}
+
     response = await client.patch(
-        f"/api/v1/workspaces/{ws}/linkedin-accounts/{account_id}",
-        json={"daily_invites": 75, "test_mode": False},
-        headers=auth(token),
+        url, json={**risky, "acknowledge_risk": True}, headers=auth(token)
     )
 
     assert response.status_code == 200
+    # Accepting the risk is itself a warning on the account.
+    assert response.json()["warning_count"] == 1
+    assert response.json()["risk_level"] == "watch"
     caps = response.json()["caps"]
     # A brand-new account is held to the first rung of the ramp curve.
     assert caps["daily_invites"] == 12

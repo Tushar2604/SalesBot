@@ -166,8 +166,29 @@ def _delete_sync(key: str) -> None:
     _s3().delete_object(Bucket=settings.s3_bucket, Key=key)
 
 
+_public_client: Any = None
+
+
+def _signer() -> Any:
+    """The client that signs browser-facing links. Signing is local (no network
+    call), but the signature covers the host, so it must be the public one."""
+    global _public_client
+    if not settings.s3_public_endpoint_url:
+        return _s3()
+    if _public_client is None:
+        _public_client = boto3.client(
+            "s3",
+            endpoint_url=settings.s3_public_endpoint_url,
+            region_name=settings.s3_region,
+            aws_access_key_id=settings.s3_access_key.get_secret_value(),
+            aws_secret_access_key=settings.s3_secret_key.get_secret_value(),
+            config=BotoConfig(signature_version="s3v4", s3={"addressing_style": "path"}),
+        )
+    return _public_client
+
+
 def _presign_sync(key: str, ttl: int) -> str:
-    url: str = _s3().generate_presigned_url(
+    url: str = _signer().generate_presigned_url(
         "get_object", Params={"Bucket": settings.s3_bucket, "Key": key}, ExpiresIn=ttl
     )
     return url

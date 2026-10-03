@@ -24,7 +24,8 @@ from sqlalchemy.orm import Session
 
 from app.core.logging import get_logger
 from app.db import session_scope
-from app.linkedin import build_driver, health
+from app.integrations import events as integration_events
+from app.linkedin import build_driver, guard, health
 from app.linkedin.classify import Classification, ResponseClass
 from app.linkedin.driver import ActionResult, LinkedInDriver
 from app.models.campaigns import (
@@ -40,7 +41,7 @@ from app.models.campaigns import (
 from app.models.leads import Lead
 from app.models.linkedin import LinkedInAccount
 from app.models.tenancy import NotificationType, Workspace
-from app.scheduler import dispatcher, engine, locks, pacing, quota
+from app.scheduler import dispatcher, engine, locks, quota
 from app.services import notification_service, tracking
 from app.worker.celery_app import celery_app
 
@@ -100,8 +101,26 @@ def _resolve_urn(
     return lead.linkedin_urn, classification
 
 
-def _perform(db: Session, driver: LinkedInDriver, task: ActionTask, lead: Lead) -> ActionResult:
+# Actions that stand alone, outside any campaign/lead — a like a person queued
+# from browsing their own feed, not a step in a sequence.
+NO_LEAD_ACTIONS: frozenset[StepType] = frozenset({StepType.LIKE_POST})
+
+
+def _perform(
+    db: Session, driver: LinkedInDriver, task: ActionTask, lead: Lead | None
+) -> ActionResult:
     """Dispatches to the right driver call for this action type."""
+    if task.action_type is StepType.LIKE_POST:
+        post_urn = str(task.payload.get("post_urn") or "")
+        if not post_urn:
+            return ActionResult(
+                classification=Classification(
+                    ResponseClass.NOT_FOUND, detail="no post urn to like"
+                )
+            )
+        return driver.like_post(post_urn)
+
+    assert lead is not None  # every other action type is tied to a lead
     public_id = str(task.payload.get("public_id") or lead.public_id)
     body = str(task.payload.get("body") or "")
 
@@ -149,6 +168,43 @@ def _perform(db: Session, driver: LinkedInDriver, task: ActionTask, lead: Lead) 
             detail=f"no handler for action type {task.action_type.value}",
         )
     )
+
+
+_ACTION_EVENTS: dict[StepType, str] = {
+    StepType.VIEW_PROFILE: "profile.viewed",
+    StepType.INVITE: "invite.sent",
+    StepType.MESSAGE: "message.sent",
+    StepType.LIKE_POST: "post.liked",
+}
+
+
+def _emit_action_event(
+    db: Session,
+    task: ActionTask,
+    account: LinkedInAccount,
+    enrollment: CampaignLead | None,
+    now: datetime,
+) -> None:
+    """Tell subscribed webhooks what just happened (outbox; sent after commit)."""
+    event_type = _ACTION_EVENTS.get(task.action_type)
+    if event_type is None:
+        return
+    lead_id = task.payload.get("lead_id")
+    lead = db.get(Lead, lead_id) if lead_id else None
+    data: dict[str, Any] = {
+        "action_id": str(task.id),
+        "at": now.isoformat(),
+        "account": integration_events.account_data(account),
+        "lead": integration_events.lead_data(lead),
+        "campaign_id": str(enrollment.campaign_id) if enrollment else None,
+        "source": "campaign" if enrollment else str(task.payload.get("source") or "manual"),
+    }
+    if task.action_type in (StepType.INVITE, StepType.MESSAGE):
+        data["text"] = str(task.payload.get("body") or "")
+    if task.action_type is StepType.LIKE_POST:
+        data["post_urn"] = str(task.payload.get("post_urn") or "")
+        data["matched_topic"] = str(task.payload.get("matched_topic") or "")
+    integration_events.emit_sync(db, task.workspace_id, event_type, data)
 
 
 def _on_success(
@@ -214,16 +270,18 @@ def _on_success(
         if campaign is not None:
             engine.advance_to_next_step(enrollment, campaign, now)
 
-    # The next action is spaced by a log-normal gap, not a fixed interval.
-    account.next_allowed_at = pacing.next_allowed_at(now)
+    # The gap to the next action was already set when the guard cleared this
+    # one (app/linkedin/guard.py): a fresh log-normal wait, shared by every
+    # part of the product that acts for this account.
     health.apply_classification(account, result.classification, now=now)
+    _emit_action_event(db, task, account, enrollment, now)
 
     log.info(
         "action.succeeded",
         task_id=str(task.id),
         action=task.action_type.value,
         account_id=str(account.id),
-        next_allowed_at=account.next_allowed_at.isoformat(),
+        next_allowed_at=account.next_allowed_at.isoformat() if account.next_allowed_at else "",
     )
 
 
@@ -370,7 +428,7 @@ def execute_action(self: Any, task_id: str) -> dict[str, str]:
             return {"status": "cancelled", "reason": "replied"}
 
         lead = db.get(Lead, task.payload.get("lead_id")) if task.payload.get("lead_id") else None
-        if lead is None:
+        if lead is None and task.action_type not in NO_LEAD_ACTIONS:
             task.status = TaskStatus.SKIPPED
             task.finished_at = now
             task.error_detail = "lead no longer exists"
@@ -403,6 +461,12 @@ def execute_action(self: Any, task_id: str) -> dict[str, str]:
         except locks.SlotBusy:
             _requeue(task, account, "the account was already performing an action")
             return {"status": "requeued", "reason": "slot busy"}
+        except guard.TooSoon as too_soon:
+            # The account acted too recently (from any part of the product):
+            # nothing was sent; run again once the gap has passed.
+            _requeue(task, account, str(too_soon))
+            task.scheduled_at = max(task.scheduled_at, too_soon.retry_at)
+            return {"status": "requeued", "reason": "action gap"}
 
         if result.ok:
             _on_success(db, task, account, enrollment, campaign, result, now)

@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from app.core.crypto import decrypt_json
 from app.core.logging import get_logger
 from app.db import session_scope
-from app.linkedin import build_driver, health, session_store
+from app.linkedin import browser_profile, build_driver, health, session_store
 from app.linkedin.driver import AuthResult, ProfileSnapshot
 from app.models.linkedin import LinkedInAccount, LinkedInAccountStatus
 from app.models.tenancy import NotificationType
@@ -50,6 +50,22 @@ def _adopt_profile(account: LinkedInAccount, profile: ProfileSnapshot) -> None:
         account.profile_country = profile.country[:2].upper()
     if not account.label or account.label == account.login_email:
         account.label = profile.full_name or account.label
+
+
+def _is_revoked_profile(db: Session, account: LinkedInAccount, profile_urn: str) -> bool:
+    """True when another row for this LinkedIn profile, in any workspace, was revoked."""
+    if not profile_urn:
+        return False
+    return (
+        db.execute(
+            select(LinkedInAccount.id).where(
+                LinkedInAccount.id != account.id,
+                LinkedInAccount.profile_urn == profile_urn,
+                LinkedInAccount.status == LinkedInAccountStatus.DISABLED,
+            ).limit(1)
+        ).first()
+        is not None
+    )
 
 
 def _disconnect_duplicates(db: Session, account: LinkedInAccount, profile_urn: str) -> int:
@@ -87,6 +103,7 @@ def _disconnect_duplicates(db: Session, account: LinkedInAccount, profile_urn: s
     for duplicate in duplicates:
         session_store.clear_session(duplicate)
         session_store.clear_challenge(duplicate)
+        browser_profile.wipe(duplicate.id)
         duplicate.status = LinkedInAccountStatus.DISCONNECTED
         duplicate.status_detail = "superseded by a newer connection of the same LinkedIn account"
         # Free the identity so the surviving row's own UPDATE (a few lines
@@ -132,6 +149,23 @@ def _finalize(db: Session, account: LinkedInAccount, result: AuthResult, *, sour
         driver = build_driver(account)
         try:
             classification, profile = driver.verify_session()
+            revoked = (
+                classification.ok
+                and profile is not None
+                and _is_revoked_profile(db, account, profile.urn)
+            )
+            if revoked:
+                # An administrator took this LinkedIn profile off the platform;
+                # a fresh "Add account" must not quietly bring it back.
+                session_store.clear_session(account)
+                browser_profile.wipe(account.id)
+                account.status = LinkedInAccountStatus.DISABLED
+                account.status_detail = (
+                    "An administrator revoked access to this LinkedIn account. "
+                    "Ask them to restore it."
+                )
+                log.warning("linkedin.auth.revoked_profile_refused", account_id=str(account.id))
+                return account.status.value
             if classification.ok and profile is not None:
                 # Now that LinkedIn has confirmed who this is, this is the one
                 # place that can reliably tell a re-connect of the same
@@ -364,15 +398,24 @@ def verify_all() -> dict[str, int]:
     """
     from sqlalchemy import select
 
+    from app.linkedin import caps as caps_mod
+
     queued = 0
+    now = datetime.now(UTC)
     with session_scope() as db:
-        stmt = select(LinkedInAccount.id).where(
+        stmt = select(LinkedInAccount).where(
             LinkedInAccount.status.in_(
                 [LinkedInAccountStatus.ACTIVE, LinkedInAccountStatus.PAUSED]
             ),
             LinkedInAccount.session_ciphertext.isnot(None),
         )
-        account_ids = list(db.execute(stmt).scalars().all())
+        # Not at night in the account's own timezone: the next sweep, six
+        # hours on, will land in its day.
+        account_ids = [
+            account.id
+            for account in db.execute(stmt).scalars()
+            if caps_mod.background_cadence(account, now=now) != "asleep"
+        ]
 
     for index, account_id in enumerate(account_ids):
         verify.apply_async(args=[str(account_id)], countdown=index * 7)

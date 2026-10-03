@@ -177,6 +177,23 @@ class ConversationSnapshot:
 
 
 @dataclass(slots=True)
+class FeedPost:
+    """One update from the account's own feed, reduced to what viewing/liking needs."""
+
+    urn: str = ""
+    author_name: str = ""
+    author_headline: str = ""
+    author_avatar_url: str = ""
+    text: str = ""
+    posted_at: datetime | None = None
+    liked: bool = False
+    like_count: int = 0
+    comment_count: int = 0
+    image_urls: list[str] = field(default_factory=list)
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class SearchPage:
     """One page of people-search results."""
 
@@ -226,8 +243,11 @@ class LinkedInDriver(Protocol):
     def search_people(self, keywords: str, start: int = 0, count: int = 10) -> SearchPage: ...
 
     def list_conversations(
-        self, limit: int = 20
-    ) -> tuple[Classification, list[ConversationSnapshot]]: ...
+        self, limit: int = 20, known: dict[str, str] | None = None
+    ) -> tuple[Classification, list[ConversationSnapshot]]:
+        """`known`: participant name (lowercased) -> last stored message, so a
+        driver can tell changed threads from unchanged ones."""
+        ...
 
     def get_network_distance(self, public_id: str) -> tuple[Classification, int | None]:
         """Degrees of separation; 1 means connected. Drives acceptance detection."""
@@ -247,10 +267,23 @@ class LinkedInDriver(Protocol):
         """Read the feed the way an opening app would, before any write."""
         ...
 
+    def get_feed(self, count: int = 10, start: int = 0) -> tuple[Classification, list[FeedPost]]:
+        """A page of the account's own home feed, for display in our own UI.
+
+        A read, like `warm_session`, just parsed into structured posts instead
+        of discarded. Unbudgeted for the same reason every other read is.
+        """
+        ...
+
     # ── writes ───────────────────────────────────────────────────────────────
     def send_invitation(self, profile_urn: str, note: str = "") -> ActionResult: ...
 
     def withdraw_invitation(self, invitation_urn: str) -> ActionResult: ...
+
+    def like_post(self, post_urn: str) -> ActionResult:
+        """Reacts to a feed update with a LIKE. Goes through the same pacing,
+        quota and circuit-breaker machinery as every other write."""
+        ...
 
     def send_message(self, profile_urn: str, text: str) -> ActionResult: ...
 

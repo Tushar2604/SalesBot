@@ -14,6 +14,7 @@ import {
   IconChevronRight,
   IconChevronUpDown,
   IconConsole,
+  IconSearch,
   IconDashboard,
   IconGear,
   IconInbox,
@@ -41,10 +42,19 @@ const SETTINGS_LINKS = [
   { href: "/team", label: "Team" },
 ];
 
+/** Active when on this route or below it — unless a more specific link
+ *  (e.g. /leads/find under /leads) is the one that matches. */
+function isActiveAdvanced(pathname: string, href: string): boolean {
+  const under = (h: string) => pathname === h || pathname.startsWith(`${h}/`);
+  if (!under(href)) return false;
+  return !ADVANCED_LINKS.some((o) => o.href !== href && o.href.startsWith(`${href}/`) && under(o.href));
+}
+
 const ADVANCED_ROUTES = ["/guide", "/leads", "/assistant", "/content", "/templates", "/agency-view", "/integrations"];
 const ADVANCED_LINKS = [
   { href: "/guide", label: "Guide", icon: IconBook },
   { href: "/leads", label: "Leads", icon: IconConsole },
+  { href: "/leads/find", label: "Find Leads (AI)", icon: IconSearch },
   { href: "/assistant", label: "AI Assistant", icon: IconSparkle },
   { href: "/content", label: "Content Studio", icon: IconPencil },
   { href: "/templates", label: "Templates", icon: IconLayers },
@@ -164,7 +174,7 @@ function navClass(active: boolean, collapsed: boolean) {
 
 export function AppSidebar({ collapsed }: { collapsed: boolean }) {
   const pathname = usePathname();
-  const { workspace } = useSession();
+  const { workspace, me } = useSession();
   const [settingsOpen, setSettingsOpen] = useState(SETTINGS_ROUTES.includes(pathname));
   const [advancedOpen, setAdvancedOpen] = useState(ADVANCED_ROUTES.some((r) => pathname === r || pathname.startsWith(`${r}/`)));
 
@@ -217,6 +227,13 @@ export function AppSidebar({ collapsed }: { collapsed: boolean }) {
             );
           })}
 
+          {me?.user.is_superuser && (
+            <Link href="/admin/accounts" className={navClass(pathname === "/admin/accounts", collapsed)}>
+              <IconShield className="h-[18px] w-[18px] shrink-0" />
+              {!collapsed && <span className="flex-1">Admin panel</span>}
+            </Link>
+          )}
+
           <button
             onClick={() => setSettingsOpen((v) => !v)}
             className={navClass(settingsActive, collapsed)}
@@ -263,7 +280,7 @@ export function AppSidebar({ collapsed }: { collapsed: boolean }) {
                   href={item.href}
                   className={clsx(
                     "rounded-md px-2 py-2 text-[13px]",
-                    pathname === item.href || pathname.startsWith(`${item.href}/`)
+                    isActiveAdvanced(pathname, item.href)
                       ? "text-white"
                       : "text-[#a3acba] hover:text-white",
                   )}
