@@ -80,3 +80,4 @@ executor takes the account's slot, warms the session, and on LinkedIn's 403
 opens the circuit and cancels the whole backlog without attempting a single
 invite.
 # SalesBot
+# salesrobot
